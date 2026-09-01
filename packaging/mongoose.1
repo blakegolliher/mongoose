@@ -1,0 +1,267 @@
+.TH MONGOOSE 1 "September 2026" "mongoose 0.1.0" "User Commands"
+.SH NAME
+mongoose \- single-host NFS-to-NFS data mover with incremental resync
+.SH SYNOPSIS
+.B mongoose
+.RI [ \-v | \-vv ]
+.B prepare
+.BI \-\-src " URL"
+.BI \-\-dst " URL"
+.BI \-\-work\-dir " DIR"
+.RI [ options ]
+.br
+.B mongoose
+.RI [ \-v | \-vv ]
+.B copy
+.BI \-\-work\-dir " DIR"
+.RI [ options ]
+.br
+.B mongoose
+.RI [ \-v | \-vv ]
+.B run
+.BI \-\-src " URL"
+.BI \-\-dst " URL"
+.BI \-\-work\-dir " DIR"
+.RI [ options ]
+.br
+.B mongoose
+.RI [ \-v | \-vv ]
+.B sync
+.BI \-\-work\-dir " DIR"
+.RB [ \-\-cutover ]
+.RI [ options ]
+.SH DESCRIPTION
+.B mongoose
+migrates one NFS export to another from a single host. It scans the
+source with an embedded parallel walker (nfs-walker), rewrites the scan
+into canonical parquet shards, and copies the data over raw NFSv3 with
+libnfs. After the initial copy it can resync incrementally while the
+source stays live, finishing with a verified cutover. Everything lives
+on local disk under one work directory: no external tools, no
+coordinator, no S3.
+.PP
+Run as root: libnfs binds reserved ports for AUTH_SYS. NFSv3 only.
+.SH COMMANDS
+.TP
+.B prepare
+Scan the source and build the local migration index (canonical shards
+plus
+.IR manifest.json )
+under
+.BR \-\-work\-dir .
+Resumable: re-running picks up after the last completed stage.
+.TP
+.B copy
+Copy using an index prepared under
+.BR \-\-work\-dir .
+Shards are processed sequentially; files within a shard copy
+concurrently. Resumable at shard granularity (completed shards are
+skipped).
+.TP
+.B run
+.BR prepare ,
+then
+.BR copy .
+.TP
+.B sync
+One converging resync pass: rescan the source, classify changes against
+the previous pass, and copy only the delta. Repeat while the source is
+live; finish with
+.B \-\-cutover
+after stopping source writers.
+.SH GLOBAL OPTIONS
+.TP
+.BR \-v ", " \-\-verbose
+Log verbosity. Default is compact: warnings plus mongoose's own stage
+lines and progress ticks.
+.B \-v
+restores full INFO from the embedded walker/rewrite/mover engines;
+.B \-vv
+enables debug.
+.BR RUST_LOG ,
+when set, overrides this flag entirely.
+.SH PREPARE OPTIONS
+.TP
+.BI \-\-src " URL"
+Source export URL, e.g.\&
+.IR nfs://source.example.com/export .
+.TP
+.BI \-\-dst " URL"
+Destination export URL.
+.TP
+.BI \-\-source\-root " PATH"
+Path inside the source export to migrate ("/" = whole export).
+Default: /.
+.TP
+.BI \-\-dest\-root " PATH"
+Path inside the destination export to copy into. Default: /.
+.TP
+.BI \-\-work\-dir " DIR"
+Local directory holding this run's index, checkpoints, and results.
+One migration per work dir.
+.TP
+.BI \-\-walker\-workers " N"
+nfs-walker GETATTR workers. Default: 32.
+.TP
+.BI \-\-shard\-size\-mb " N"
+Target size of each canonical parquet shard. Default: 512.
+.TP
+.BI \-\-exclude " GLOB"
+Directory glob to exclude from the scan (repeatable).
+.TP
+.BI \-\-scan\-dir " DIR"
+Use an existing nfs-walker output directory instead of scanning.
+.TP
+.BI \-\-run\-id " ID"
+Run identifier recorded in
+.I run.json
+and
+.IR manifest.json .
+Default: run-<UTC timestamp>.
+.TP
+.B \-\-purge\-intermediates
+Delete the raw walker scan output once the canonical shards are
+committed. The scan is a pure intermediate that doubles the index
+footprint; canonical shards and the manifest are always kept. A
+.B \-\-scan\-dir
+outside the work dir is never touched.
+.SH COPY TUNING OPTIONS
+Shared by
+.BR copy ,
+.BR run ,
+and
+.BR sync .
+.TP
+.BI \-\-nfs\-connections " N"
+libnfs context pairs to pre-mount. Each pair costs two reserved ports;
+~111 pairs is the observed per-host ceiling. Default: 32.
+.TP
+.BI \-\-inflight\-small " N"
+Concurrent in-flight files < 1 MiB. Default: 256.
+.TP
+.BI \-\-inflight\-medium " N"
+Concurrent in-flight files 1 MiB \(en 1 GiB. Default: 16.
+.TP
+.BI \-\-inflight\-large " N"
+Concurrent in-flight files > 1 GiB. Default: 4.
+.TP
+.B \-\-use\-raw\-fh
+Copy regular files through the raw NFSv3 filehandle fast path (~5 RPCs
+per small file instead of ~60\(en80).
+.TP
+.B \-\-direct\-commit
+Raw-FH path only: CREATE under the final name and skip the atomic
+.I .partial
++ RENAME publish. Faster, but a crash can leave a torn file visible;
+only safe while nothing consumes the destination.
+.TP
+.B \-\-bucketed\-async
+Use the bucketed async libnfs pool for regular-file copies (opt-in; the
+sync MultiPool remains the default).
+.TP
+.BI \-\-rpc\-timeout\-ms " N"
+Per-RPC libnfs timeout in milliseconds (0 = libnfs default).
+.SH SYNC OPTIONS
+.B sync
+accepts the copy tuning options above, plus
+.BR \-\-walker\-workers ,
+.BR \-\-shard\-size\-mb ,
+.BR \-\-exclude ,
+.BR \-\-scan\-dir ,
+and
+.B \-\-purge\-intermediates
+(as in
+.BR prepare ),
+and:
+.TP
+.B \-\-cutover
+Cutover verification: source writers must be stopped. Fails loudly if
+the classifier finds any drift (new, dirty, pending, or deleted rows);
+zero drift means the trees have converged.
+.TP
+.B \-\-cutover\-allow\-drift
+With
+.BR \-\-cutover :
+copy the drift instead of failing on it.
+.TP
+.BI \-\-keep\-passes " N"
+Completed pass dirs to retain (older ones are pruned after the baseline
+advances). Default: 2.
+.SH EXIT STATUS
+.TP
+.B 0
+Success \(em including a deliberate SIGINT/SIGTERM stop (resume with
+.BR "mongoose copy" ).
+.TP
+.B 1
+Error (bad flags, missing index, unreachable export, corrupt shard).
+.TP
+.B 2
+Copy completed but recorded per-file failures (see
+.I failures/
+in the work dir).
+.SH ENVIRONMENT
+.TP
+.B RUST_LOG
+Overrides the
+.B \-v
+verbosity flag entirely (tracing-subscriber env-filter syntax).
+.TP
+.B LIBNFS_USE_ALL_RESERVED
+Set to 1 by mongoose automatically so libnfs uses the full reserved
+port range (without it,
+.I /etc/services
+name registrations throttle a host to ~55 context pairs). Export
+.B LIBNFS_USE_ALL_RESERVED=0
+to opt out.
+.SH FILES
+Work-dir layout:
+.PP
+.nf
+<work-dir>/
+  run.json                      run identity (sticky; a re-run with
+                                different src/dst is refused)
+  scan/attempt-NNNN/            nfs-walker output + progress log
+  scan.json                     scan checkpoint
+  canonical/part-NNNN.parquet   canonical shards
+  rewrite.json                  rewrite checkpoint
+  manifest.json                 local run plan
+  progress.json                 copy progress + completed-shard list
+  failures/part-NNNN.jsonl      per-file failures, per shard
+  downgrades/part-NNNN.jsonl    per-file metadata downgrades, per shard
+  passes/pass-NNNN/             resync pass state (classify results,
+                                delta shards, deleted.jsonl)
+.fi
+.SH EXAMPLES
+Full migration in one shot:
+.PP
+.nf
+mongoose run \\
+  --src nfs://source.example.com/export \\
+  --dst nfs://dest.example.com/export \\
+  --work-dir /var/lib/mongoose/run-001 \\
+  --nfs-connections 32 \\
+  --use-raw-fh
+.fi
+.PP
+Resync while the source stays live, then cut over:
+.PP
+.nf
+mongoose sync --work-dir /var/lib/mongoose/run-001 --use-raw-fh
+# ... stop source writers ...
+mongoose sync --work-dir /var/lib/mongoose/run-001 --use-raw-fh
+mongoose sync --work-dir /var/lib/mongoose/run-001 --cutover
+.fi
+.SH NOTES
+Resync is scan-diff based: each pass is a full metadata rescan diffed
+against the previous pass on (file_type, size, mtime, ctime), with
+whole-file recopy on any mismatch. Deletions are detected and recorded
+but never propagated to the destination. See the project README for the
+full correctness posture and v1 limitations.
+.SH AUTHOR
+Blake Golliher
+.SH LICENSE
+AGPL-3.0-only
+.SH SEE ALSO
+Project home:
+.I https://github.com/blakegolliher/mongoose

@@ -1,3 +1,4 @@
 /target
 vamoose.log
 *.log
+/dist

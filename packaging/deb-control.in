@@ -1,0 +1,13 @@
+Package: mongoose
+Version: @VERSION@
+Section: utils
+Priority: optional
+Architecture: @ARCH@
+Maintainer: Blake Golliher <blakegolliher@gmail.com>
+Homepage: https://github.com/blakegolliher/mongoose
+Description: Single-host NFS-to-NFS data mover with incremental resync
+ mongoose migrates one NFS export to another from a single host: scan
+ the source with an embedded parallel walker, build a canonical parquet
+ index, copy over raw NFSv3 with libnfs, then resync incrementally
+ while the source stays live and finish with a verified cutover. One
+ binary, no external tools, no coordinator, no S3.
