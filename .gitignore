@@ -2,3 +2,4 @@
 vamoose.log
 *.log
 /dist
+/packaging/libnfs-stage

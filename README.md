@@ -55,6 +55,18 @@ dependency); the workspace `.cargo/config.toml` sets it, but an
 exported `RUSTFLAGS` overrides that file — keep the flag if you set
 your own.
 
+## Packaging
+
+`make release` produces an RPM, a DEB, and a tarball under `dist/`,
+each installing the binary and the `mongoose(1)` man page. Release
+artifacts are **portable by default**: built with `cargo-zigbuild`
+against glibc 2.34 using a libnfs stage sha256-verified against
+`packaging/libnfs.lock.json` (place the pinned `libnfs.a` +
+`libnfs.so` pair in `packaging/libnfs-stage/`, or point
+`LIBNFS_STAGE` elsewhere), then gated on the binary's maximum
+`GLIBC_*` symbol version. `make rpm PORTABLE=0` packages a host build
+instead — don't ship those.
+
 ## Provenance
 
 The engine crates are extracted from the vamoose distributed-migration
