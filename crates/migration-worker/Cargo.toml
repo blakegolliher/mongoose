@@ -1,0 +1,68 @@
+[package]
+name        = "migration-worker"
+version     = { workspace = true }
+edition     = { workspace = true }
+authors     = { workspace = true }
+license     = { workspace = true }
+description = "Migration worker binary (mig-worker)"
+publish     = false
+
+[lib]
+name = "migration_worker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mig-worker"
+path = "src/main.rs"
+
+[dependencies]
+migration-core  = { workspace = true }
+migration-mover = { workspace = true }
+# Shared control-plane schema and worker HTTP bodies.
+migration-control-protocol = { workspace = true }
+
+tokio    = { workspace = true }
+tokio-util = { workspace = true }
+serde    = { workspace = true }
+serde_json = { workspace = true }
+anyhow   = { workspace = true }
+thiserror = { workspace = true }
+tracing  = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap     = { workspace = true }
+chrono   = { workspace = true }
+crossbeam-channel = { workspace = true }
+hex      = { workspace = true }
+toml     = { workspace = true }
+hostname = { workspace = true }
+getrandom = { workspace = true }
+libc     = { workspace = true }
+uuid     = { workspace = true }
+
+# HTTP client for the coord-facing wire layer (Phase 3).
+reqwest = { workspace = true }
+
+[dev-dependencies]
+# In-process coordinator integration tests only.
+migration-coord = { workspace = true }
+# Used by the orchestrator flush_sinks tests to implement the mock
+# ClaimStore (the trait is declared with #[async_trait]).
+async-trait = { workspace = true }
+# Used by tests/coord_client_integration.rs to bring up an in-process
+# coord (router + axum_server bind) and drive it from the client.
+axum-server = { workspace = true }
+http = { workspace = true }
+axum = { workspace = true }
+# Re-exported mock ClaimStore (claim::test_util::FakeStore) for
+# tests/two_live_workers.rs — one canonical in-memory mock, no
+# forked copies (see docs/work-items/CLAIM_FRESH_GRACE.md).
+migration-core = { workspace = true, features = ["test-util"] }
+# `start_paused` mock time for the two-live-workers harness.
+tokio = { workspace = true, features = ["test-util"] }
+# Used by tests/worker_error_classification.rs (F13) to construct
+# the migration-core Error variants the classifier table covers.
+# All three are already compiled as migration-core dependencies, so
+# they add no new build cost.
+parquet = { workspace = true }
+arrow = { workspace = true }
+aws-sdk-s3 = { workspace = true }

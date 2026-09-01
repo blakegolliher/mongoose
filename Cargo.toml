@@ -1,0 +1,117 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/migration-core",
+    "crates/migration-control-protocol",
+    "crates/migration-mover",
+    "crates/migration-worker",
+    "crates/migration-coord",
+    "crates/mig-walker-rewrite",
+    "crates/migration-resync",
+    "crates/mongoose",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Blake Golliher"]
+license = "AGPL-3.0-only"
+rust-version = "1.91.1"
+repository = "https://github.com/blakegolliher/mongoose"
+description = "Single-host NFS-to-NFS data mover with incremental resync"
+readme = "README.md"
+
+[workspace.dependencies]
+# Internal
+migration-core             = { path = "crates/migration-core" }
+migration-control-protocol = { path = "crates/migration-control-protocol" }
+migration-mover            = { path = "crates/migration-mover" }
+migration-coord            = { path = "crates/migration-coord" }
+
+# AWS / S3 (pulled in by the shared engine crates; mongoose itself
+# does no S3 I/O)
+aws-sdk-s3   = "1"
+aws-config   = "1"
+aws-smithy-types-convert = { version = "0.60", features = ["convert-chrono"] }
+# Used only on the `verify_tls = false` path to wire a custom rustls
+# ClientConfig into the SDK. The smithy 1.x TLS context has no public
+# "skip cert verification" knob, so we route through the deprecated-
+# but-public hyper_014 builder. Remove when smithy exposes a danger
+# knob upstream and we can drop the legacy path.
+aws-smithy-http-client = { version = "1", default-features = false, features = ["hyper-014", "legacy-rustls-ring"] }
+hyper-rustls = { version = "0.24", default-features = false, features = ["http1", "http2", "tls12", "tokio-runtime", "logging"] }
+rustls       = { version = "0.21", features = ["dangerous_configuration"] }
+
+# Parquet / Arrow (match nfs-walker's version family)
+arrow   = { version = "54", default-features = false, features = ["ipc"] }
+parquet = { version = "54", default-features = false, features = ["arrow", "zstd"] }
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "fs", "sync", "time", "io-util", "net"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# Serde
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Errors
+anyhow    = "1"
+thiserror = "1"
+
+# Tracing
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender   = "0.2"
+file-rotate        = "0.7"
+
+# CLI
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+
+# Utilities
+chrono     = { version = "0.4", features = ["serde"] }
+base64     = "0.22"
+bytes      = "1"
+humansize  = "2"
+uuid       = { version = "1", features = ["v4", "serde"] }
+hex        = "0.4"
+toml       = "0.8"
+hostname   = "0.4"
+getrandom  = "0.2"
+futures    = "0.3"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+# Concurrency primitives (same as nfs-walker)
+crossbeam-channel = "0.5"
+crossbeam-deque   = "0.8"
+
+# memory-mapped parquet
+memmap2 = "0.9"
+
+# Coord HTTP layer (REST + SSE)
+axum        = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "macros", "matched-path"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+tower       = { version = "0.5", default-features = false, features = ["util"] }
+tower-http  = { version = "0.6", default-features = false, features = ["trace", "timeout"] }
+http        = "1"
+
+# libnfs FFI (see migration-mover/build.rs)
+libc = "0.2"
+
+# trait async fns over dyn
+async-trait = "0.1"
+
+# Imperative async stream construction (SSE handler)
+async-stream = "0.3"
+
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = 3
+
+[profile.dev]
+opt-level = 1

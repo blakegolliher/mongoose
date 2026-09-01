@@ -1,0 +1,28 @@
+[package]
+name        = "migration-mover"
+version     = { workspace = true }
+edition     = { workspace = true }
+authors     = { workspace = true }
+license     = { workspace = true }
+description = "NFSv3 file mover with sync and bucketed async libnfs data paths"
+publish     = false
+links       = "nfs"   # tells cargo this crate links libnfs
+
+[dependencies]
+migration-core = { workspace = true }
+
+tokio    = { workspace = true }
+anyhow   = { workspace = true }
+thiserror = { workspace = true }
+tracing  = { workspace = true }
+bytes    = { workspace = true }
+libc     = { workspace = true }
+async-trait = { workspace = true }
+base64     = { workspace = true }
+serde_json = { workspace = true }
+chrono     = { workspace = true }
+futures    = { workspace = true }
+xxhash-rust = { workspace = true }
+
+[build-dependencies]
+pkg-config = "0.3"

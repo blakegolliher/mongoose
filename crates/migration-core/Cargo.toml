@@ -1,0 +1,47 @@
+[package]
+name        = "migration-core"
+version     = { workspace = true }
+edition     = { workspace = true }
+authors     = { workspace = true }
+license     = { workspace = true }
+description = "Shared types, S3 protocol, and parquet schema for the migration system"
+publish     = false
+
+[dependencies]
+aws-sdk-s3 = { workspace = true }
+aws-config = { workspace = true }
+aws-smithy-http-client = { workspace = true }
+hyper-rustls = { workspace = true }
+rustls       = { workspace = true }
+
+arrow   = { workspace = true }
+parquet = { workspace = true }
+
+# "process" on top of the workspace features: `prepare_tools` spawns
+# nfs-walker / mig-walker-rewrite as child processes.
+tokio      = { workspace = true, features = ["process"] }
+tokio-util = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+anyhow     = { workspace = true }
+thiserror  = { workspace = true }
+tracing    = { workspace = true }
+chrono     = { workspace = true }
+base64     = { workspace = true }
+bytes      = { workspace = true }
+uuid       = { workspace = true }
+hex        = { workspace = true }
+memmap2    = { workspace = true }
+async-trait = { workspace = true }
+futures    = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+# prepare_tools filesystem-discovery tests.
+tempfile = "3"
+
+[features]
+# Exposes `claim::test_util` (the in-memory mock ClaimStore used by
+# this crate's own protocol tests) to downstream crates' tests, so
+# integration harnesses don't fork a divergent copy of the mock.
+test-util = []
