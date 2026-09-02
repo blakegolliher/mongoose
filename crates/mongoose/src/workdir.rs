@@ -105,28 +105,34 @@ impl WorkDir {
     }
 }
 
-/// Identity of one run, written first and compared on every resume so
-/// a flag edit mid-run cannot silently mix two migrations.
+/// Identity of one job, written first and compared on every resume so
+/// a flag edit mid-run cannot silently mix two migrations. The
+/// excludes are part of the identity: every later `sync` rescans with
+/// the same set, so a tree excluded from the copy never shows up as
+/// "new" in a sync.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunSpec {
     pub run_id: String,
     pub created_utc: String,
     pub source: Endpoint,
     pub dest: Endpoint,
+    /// Directory globs skipped by every scan of this job.
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 /// Write the run spec on first use; on resume, refuse a spec that
-/// names a different source or destination.
+/// names a different source, destination, or exclude set.
 pub fn ensure_run_spec(path: &Path, fresh: RunSpec) -> Result<RunSpec> {
     match read_json_opt::<RunSpec>(path)? {
         Some(existing) => {
-            let same = existing.source.url == fresh.source.url
+            let same_endpoints = existing.source.url == fresh.source.url
                 && existing.source.root == fresh.source.root
                 && existing.dest.url == fresh.dest.url
                 && existing.dest.root == fresh.dest.root;
-            if !same {
+            if !same_endpoints {
                 anyhow::bail!(
-                    "this work dir belongs to run {} ({}{} -> {}{}); the flags now say \
+                    "this work dir belongs to job {} ({}{} -> {}{}); the flags now say \
                      {}{} -> {}{}. Restore the flags or use a fresh --work-dir.",
                     existing.run_id,
                     existing.source.url,
@@ -139,6 +145,16 @@ pub fn ensure_run_spec(path: &Path, fresh: RunSpec) -> Result<RunSpec> {
                     fresh.dest.root,
                 );
             }
+            if sorted(&existing.exclude) != sorted(&fresh.exclude) {
+                anyhow::bail!(
+                    "this work dir belongs to job {} with --exclude [{}]; the flags now say \
+                     [{}]. Excludes are fixed for the life of a job: restore the flags or \
+                     use a fresh --work-dir.",
+                    existing.run_id,
+                    existing.exclude.join(", "),
+                    fresh.exclude.join(", "),
+                );
+            }
             Ok(existing)
         }
         None => {
@@ -148,15 +164,11 @@ pub fn ensure_run_spec(path: &Path, fresh: RunSpec) -> Result<RunSpec> {
     }
 }
 
-/// Roots are absolute paths inside the export: `/`, `/a/b`. Accept
-/// `a/b` and trailing slashes from operators.
-pub fn normalize_root(raw: &str) -> String {
-    let trimmed = raw.trim().trim_matches('/');
-    if trimmed.is_empty() {
-        "/".to_string()
-    } else {
-        format!("/{trimmed}")
-    }
+fn sorted(v: &[String]) -> Vec<&str> {
+    let mut out: Vec<&str> = v.iter().map(String::as_str).collect();
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 pub fn default_run_id() -> String {
@@ -182,6 +194,7 @@ mod tests {
             created_utc: "2026-08-31T00:00:00Z".into(),
             source: endpoint("nfs://s/e", "/"),
             dest: endpoint("nfs://d/e", "/"),
+            exclude: vec![".snapshot".into()],
         }
     }
 
@@ -235,17 +248,45 @@ mod tests {
 
         // A different destination is refused.
         let mut moved = spec();
-        moved.dest.root = "/elsewhere".into();
+        moved.dest.url = "nfs://d/elsewhere".into();
         let err = ensure_run_spec(&path, moved).unwrap_err();
         assert!(format!("{err:#}").contains("--work-dir"));
     }
 
     #[test]
-    fn roots_normalize_to_absolute_without_trailing_slash() {
-        assert_eq!(normalize_root(""), "/");
-        assert_eq!(normalize_root("/"), "/");
-        assert_eq!(normalize_root("data"), "/data");
-        assert_eq!(normalize_root("/data/"), "/data");
-        assert_eq!(normalize_root(" /a/b/ "), "/a/b");
+    fn run_spec_excludes_are_sticky_but_order_insensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.json");
+        let mut two = spec();
+        two.exclude = vec!["tmp".into(), ".snapshot".into()];
+        ensure_run_spec(&path, two.clone()).unwrap();
+
+        let mut reordered = two.clone();
+        reordered.exclude.reverse();
+        assert_eq!(ensure_run_spec(&path, reordered).unwrap(), two);
+
+        let mut fewer = two.clone();
+        fewer.exclude.pop();
+        let err = ensure_run_spec(&path, fewer).unwrap_err();
+        assert!(format!("{err:#}").contains("--exclude"), "{err:#}");
+    }
+
+    #[test]
+    fn run_spec_without_excludes_still_loads() {
+        // A run.json written before excludes were recorded.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.json");
+        std::fs::write(
+            &path,
+            r#"{"run_id":"run-old","created_utc":"2026-08-31T00:00:00Z",
+                "source":{"kind":"nfs","url":"nfs://s/e","root":"/"},
+                "dest":{"kind":"nfs","url":"nfs://d/e","root":"/"}}"#,
+        )
+        .unwrap();
+        let mut fresh = spec();
+        fresh.exclude.clear();
+        let loaded = ensure_run_spec(&path, fresh).unwrap();
+        assert_eq!(loaded.run_id, "run-old");
+        assert!(loaded.exclude.is_empty());
     }
 }

@@ -12,10 +12,9 @@
 //! SIGINT/SIGTERM is honored at the next batch boundary — no row is
 //! ever interrupted mid-copy. The interrupted shard is not marked
 //! completed, so a re-run reprocesses it from the top (copies are
-//! idempotent: `.partial` + rename, or truncate-and-heal on the
-//! direct-commit path).
+//! idempotent: `.partial` + rename).
 
-use crate::cli::CopyTuning;
+use crate::cli::Tuning;
 use crate::manifest::{self, LocalManifest};
 use crate::progress::{write_shard_jsonl, CopyProgress};
 use crate::util::raise_fd_limit;
@@ -50,41 +49,51 @@ pub struct CopySummary {
     pub interrupted: bool,
 }
 
-/// Project the local manifest + CLI tuning onto the shared mover
-/// factory parameters. Pure; unit-tested without libnfs.
+/// In-flight file limits for a `--parallel` level, scaled from the
+/// engine defaults (256/16/4 at 32 pairs): eight small files per
+/// pair, one medium file per two pairs, one large file per eight.
+pub fn inflight_for(tuning: &Tuning) -> InflightProfile {
+    let p = tuning.parallel.max(1) as usize;
+    InflightProfile {
+        small: p * 8,
+        medium: (p / 2).max(1),
+        large: (p / 8).max(1),
+        ..InflightProfile::default()
+    }
+}
+
+/// Project the local manifest + `--parallel` onto the shared mover
+/// factory parameters. Everything else the engine lets a caller tune
+/// is fixed here: the raw-FH fast path (always), atomic `.partial` +
+/// rename publish (never direct commit), the sync context pool, and
+/// the default per-RPC timeout. Pure; unit-tested without libnfs.
 pub fn mover_params(
     m: &LocalManifest,
-    tuning: &CopyTuning,
+    tuning: &Tuning,
     require_chown: bool,
     host_id: String,
 ) -> MoverParams {
-    let inflight = InflightProfile {
-        small: tuning.inflight_small,
-        medium: tuning.inflight_medium,
-        large: tuning.inflight_large,
-        ..InflightProfile::default()
-    };
     MoverParams {
         source_url: m.source.url.clone(),
         dest_url: m.dest.url.clone(),
         source_root: m.source.root.clone(),
         dest_root: m.dest.root.clone(),
         options: m.options.clone(),
-        nfs_connections: tuning.nfs_connections.max(1) as usize,
-        use_bucketed_pool: tuning.bucketed_async,
-        use_raw_fh: tuning.use_raw_fh,
-        direct_commit: tuning.direct_commit,
-        rpc_timeout_ms: tuning.rpc_timeout_ms,
+        nfs_connections: tuning.parallel.max(1) as usize,
+        use_bucketed_pool: false,
+        use_raw_fh: true,
+        direct_commit: false,
+        rpc_timeout_ms: migration_mover::DEFAULT_RPC_TIMEOUT_MS,
         require_chown,
         // Walker `size` is advisory (SCHEMA_CONTRACT.md "Size
         // semantics"); source truth wins, same as the worker default.
         require_unchanged_size: false,
-        inflight,
+        inflight: inflight_for(tuning),
         host_id,
     }
 }
 
-pub async fn run(work_dir: &Path, tuning: &CopyTuning) -> Result<CopySummary> {
+pub async fn run(work_dir: &Path, tuning: &Tuning) -> Result<CopySummary> {
     run_manifest(work_dir, tuning, "manifest.json").await
 }
 
@@ -93,13 +102,13 @@ pub async fn run(work_dir: &Path, tuning: &CopyTuning) -> Result<CopySummary> {
 /// (progress, sinks, resume) behaves identically.
 pub async fn run_manifest(
     work_dir: &Path,
-    tuning: &CopyTuning,
+    tuning: &Tuning,
     manifest_name: &str,
 ) -> Result<CopySummary> {
     let wd = WorkDir::new(work_dir);
     let m = manifest::load_file(&wd.root().join(manifest_name))?.ok_or_else(|| {
         anyhow::anyhow!(
-            "no {manifest_name} under {}; run `mongoose prepare` (or `mongoose run`) first",
+            "no {manifest_name} under {}; run `mongoose copy` first",
             wd.root().display()
         )
     })?;
@@ -122,15 +131,10 @@ pub async fn run_manifest(
     }
 
     println!(
-        "mongoose copy\n  run     {}\n  source  {}{}\n  dest    {}{}\n  shards  {} ({} rows, {} bytes)\n",
-        m.run_id,
-        m.source.url,
-        m.source.root,
-        m.dest.url,
-        m.dest.root,
+        "copying {} shards ({} entries) with --parallel {}\n",
         m.shards.len(),
         m.total_rows,
-        m.total_bytes,
+        tuning.parallel,
     );
 
     // Stop token: SIGINT/SIGTERM finishes the batch in flight and
@@ -381,17 +385,8 @@ mod tests {
     use crate::manifest::{LocalShard, MANIFEST_FORMAT_VERSION};
     use migration_core::records::{Endpoint, EndpointKind, MigrationOptions};
 
-    fn tuning() -> CopyTuning {
-        CopyTuning {
-            nfs_connections: 24,
-            inflight_small: 128,
-            inflight_medium: 8,
-            inflight_large: 2,
-            use_raw_fh: true,
-            direct_commit: false,
-            bucketed_async: false,
-            rpc_timeout_ms: 42_000,
-        }
+    fn tuning() -> Tuning {
+        Tuning { parallel: 24 }
     }
 
     fn local_manifest() -> LocalManifest {
@@ -429,15 +424,15 @@ mod tests {
         assert_eq!(p.source_root, "/data");
         assert_eq!(p.dest_root, "/copy");
         assert_eq!(p.nfs_connections, 24);
-        assert!(p.use_raw_fh);
-        assert!(!p.direct_commit);
-        assert!(!p.use_bucketed_pool);
-        assert_eq!(p.rpc_timeout_ms, 42_000);
+        assert!(p.use_raw_fh, "raw-FH fast path is always on");
+        assert!(!p.direct_commit, "atomic publish is never traded away");
+        assert!(!p.use_bucketed_pool, "the sync pool is the only pool");
+        assert_eq!(p.rpc_timeout_ms, migration_mover::DEFAULT_RPC_TIMEOUT_MS);
         assert!(p.require_chown);
         assert!(!p.require_unchanged_size, "walker size stays advisory");
-        assert_eq!(p.inflight.small, 128);
-        assert_eq!(p.inflight.medium, 8);
-        assert_eq!(p.inflight.large, 2);
+        assert_eq!(p.inflight.small, 192);
+        assert_eq!(p.inflight.medium, 12);
+        assert_eq!(p.inflight.large, 3);
         // Stripe knobs keep the engine defaults.
         assert_eq!(
             p.inflight.large_stripe_size,
@@ -448,14 +443,30 @@ mod tests {
         let cfg = mover_factory::mover_config(&p);
         assert_eq!(cfg.source_root, "/data");
         assert!(cfg.use_raw_fh);
-        assert_eq!(cfg.inflight.small, 128);
+        assert_eq!(cfg.inflight.small, 192);
+    }
+
+    #[test]
+    fn inflight_scales_with_parallel_and_never_hits_zero() {
+        let d = inflight_for(&Tuning::default());
+        assert_eq!(
+            (d.small, d.medium, d.large),
+            (256, 16, 4),
+            "defaults match the engine"
+        );
+        let one = inflight_for(&Tuning { parallel: 1 });
+        assert_eq!((one.small, one.medium, one.large), (8, 1, 1));
+        let max = inflight_for(&Tuning {
+            parallel: crate::cli::MAX_PARALLEL,
+        });
+        assert_eq!((max.small, max.medium, max.large), (800, 50, 12));
     }
 
     #[tokio::test]
-    async fn copy_without_a_manifest_names_prepare() {
+    async fn copy_without_a_manifest_names_the_command_to_run() {
         let dir = tempfile::tempdir().unwrap();
         let err = run(dir.path(), &tuning()).await.unwrap_err();
-        assert!(format!("{err:#}").contains("mongoose prepare"), "{err:#}");
+        assert!(format!("{err:#}").contains("mongoose copy"), "{err:#}");
     }
 
     #[tokio::test]

@@ -1,97 +1,105 @@
-//! `mongoose prepare` — build the local migration index: scan with the
-//! compiled-in nfs-walker library, rewrite to canonical parquet shards
-//! with the compiled-in mig-walker-rewrite library, and write the
-//! local manifest. One binary, no external tools. Every stage
-//! checkpoints under the work dir and re-running resumes.
+//! The first half of `mongoose copy`: build the local migration index.
+//! Scan with the compiled-in nfs-walker library, rewrite the scan to
+//! canonical parquet shards with the compiled-in mig-walker-rewrite
+//! library, and write the local manifest. Every stage checkpoints
+//! under the work dir and re-running resumes.
 
-use crate::cli::PrepareArgs;
+use crate::cli::CopyArgs;
+use crate::endpoint;
 use crate::manifest::{self, LocalManifest};
 use crate::scan::{self, ScanParams};
 use crate::util::{raise_fd_limit, utc_now};
-use crate::workdir::{default_run_id, ensure_run_spec, normalize_root, RunSpec, WorkDir};
+use crate::workdir::{default_run_id, ensure_run_spec, RunSpec, WorkDir};
 use anyhow::{Context, Result};
 use migration_core::prepare_tools as tools;
 use migration_core::records::{Endpoint, EndpointKind, MigrationOptions};
 
-pub async fn run(args: &PrepareArgs) -> Result<LocalManifest> {
+/// The whole URL is what both the scanner and the mover mount, and
+/// everything under it is the migration root. (The engine also
+/// supports a root *inside* the mount; mongoose does not expose it —
+/// put the path in the URL instead.)
+const ROOT: &str = "/";
+
+pub async fn run(args: &CopyArgs) -> Result<LocalManifest> {
     // Root is required by the embedded scanner and the mover (reserved
     // ports for AUTH_SYS). SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } != 0 {
-        tracing::warn!("mongoose prepare is not running as root; NFS mounts usually need sudo");
+        tracing::warn!("mongoose is not running as root; NFS access usually needs sudo");
     }
     raise_fd_limit();
 
-    let wd = WorkDir::new(&args.work_dir);
+    // Validate both URLs and refuse an overlapping pair before any
+    // long stage — and before writing anything to the work dir.
+    let src = endpoint::parse("--src", &args.src)?;
+    let dst = endpoint::parse("--dst", &args.dst)?;
+    endpoint::check_overlap(&src, &dst)?;
     let source = Endpoint {
         kind: EndpointKind::Nfs,
-        url: args.src.trim_end_matches('/').to_string(),
-        root: normalize_root(&args.source_root),
+        url: src.url(),
+        root: ROOT.to_string(),
     };
     let dest = Endpoint {
         kind: EndpointKind::Nfs,
-        url: args.dst.trim_end_matches('/').to_string(),
-        root: normalize_root(&args.dest_root),
+        url: dst.url(),
+        root: ROOT.to_string(),
     };
-    // Refuse an overlapping source/destination before any long stage.
     migration_core::overlap::check(&source, &dest)?;
 
+    let wd = WorkDir::new(&args.work_dir);
     std::fs::create_dir_all(wd.root())
         .with_context(|| format!("creating {}", wd.root().display()))?;
     let spec = ensure_run_spec(
         &wd.run_json(),
         RunSpec {
-            run_id: args.run_id.clone().unwrap_or_else(default_run_id),
+            run_id: default_run_id(),
             created_utc: utc_now(),
             source,
             dest,
+            exclude: args.exclude.clone(),
         },
     )?;
 
     println!(
-        "mongoose prepare\n  run     {}\n  source  {}\n  dest    {}\n  work    {}\n",
+        "mongoose copy\n  job      {}\n  source   {}\n  dest     {}\n  exclude  {}\n  work     {}\n",
         spec.run_id,
-        tools::scan_url(&spec.source.url, &spec.source.root),
-        tools::scan_url(&spec.dest.url, &spec.dest.root),
+        spec.source.url,
+        spec.dest.url,
+        if spec.exclude.is_empty() {
+            "(none)".to_string()
+        } else {
+            spec.exclude.join(" ")
+        },
         wd.root().display()
     );
 
     if let Some(existing) = manifest::load(&wd)? {
         println!(
-            "already prepared: {} ({} shards, {} rows). Nothing to do; run `mongoose copy \
-             --work-dir {}` to migrate.",
-            wd.manifest_json().display(),
+            "index already built ({} shards, {} entries); skipping the scan\n",
             existing.shards.len(),
             existing.total_rows,
-            wd.root().display()
         );
         return Ok(existing);
     }
 
     // ---- 1. scan ---------------------------------------------------
-    println!("[1/3] scan");
+    println!("[1/3] scan the source");
     let scan = scan::ensure_scan(
         &wd,
         &ScanParams {
             scan_url: tools::scan_url(&spec.source.url, &spec.source.root),
-            workers: args.walker_workers,
-            shard_size_mb: args.shard_size_mb,
-            exclude: args.exclude.clone(),
-            scan_dir_override: args.scan_dir.clone(),
+            workers: args.tuning.walker_workers(),
+            exclude: spec.exclude.clone(),
         },
     )
     .await?;
-    println!(
-        "  scan dir {}\n  walker   {}\n",
-        scan.scan_dir.display(),
-        scan.walker_version
-    );
+    println!("  scanner  {}\n", scan.walker_version);
 
     // ---- 2. canonical rewrite --------------------------------------
-    println!("[2/3] canonical rewrite");
+    println!("[2/3] build the index");
     scan::ensure_canonical(&wd, &scan).await?;
 
     // ---- 3. verify shards and write the manifest -------------------
-    println!("[3/3] verify shards and write manifest");
+    println!("[3/3] verify the index");
     let m = manifest::build(
         &wd,
         &spec.run_id,
@@ -99,17 +107,14 @@ pub async fn run(args: &PrepareArgs) -> Result<LocalManifest> {
         spec.dest.clone(),
         MigrationOptions::default(),
     )?;
-    if args.purge_intermediates {
-        scan::purge_scan_output(&wd);
-    }
+    // The raw scan is a pure intermediate that doubles the index
+    // footprint; the canonical shards and manifest are what copy and
+    // sync read.
+    scan::purge_scan_output(&wd);
     println!(
-        "\nprepared: {} ({} shards, {} rows, {} bytes of shard index)\n\
-         Copy with `mongoose copy --work-dir {}`.",
-        wd.manifest_json().display(),
+        "\nindex ready: {} shards, {} entries\n",
         m.shards.len(),
         m.total_rows,
-        m.total_bytes,
-        wd.root().display()
     );
     Ok(m)
 }
@@ -117,41 +122,39 @@ pub async fn run(args: &PrepareArgs) -> Result<LocalManifest> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::PrepareArgs;
+    use crate::cli::{CopyArgs, Tuning};
 
-    fn args(
-        src: &str,
-        dst: &str,
-        src_root: &str,
-        dst_root: &str,
-        work: &std::path::Path,
-    ) -> PrepareArgs {
-        PrepareArgs {
+    fn args(src: &str, dst: &str, work: &std::path::Path) -> CopyArgs {
+        CopyArgs {
             src: src.into(),
             dst: dst.into(),
-            source_root: src_root.into(),
-            dest_root: dst_root.into(),
             work_dir: work.to_path_buf(),
-            walker_workers: 1,
-            shard_size_mb: 1,
             exclude: vec![],
-            scan_dir: None,
-            run_id: None,
-            purge_intermediates: false,
+            tuning: Tuning::default(),
         }
     }
 
     #[tokio::test]
     async fn overlapping_source_and_dest_are_refused_before_any_work() {
         let dir = tempfile::tempdir().unwrap();
-        // Identical export + dest root nested under source root: the
-        // classic truncate-your-source misconfiguration.
-        let a = args("nfs://h/export", "nfs://h/export", "/", "/dst", dir.path());
+        // Destination nested under the source on the same server: the
+        // classic truncate-your-source misconfiguration, spelled the
+        // way mongoose operators spell it (whole path in the URL).
+        let a = args("nfs://h/export", "nfs://h/export/dst", dir.path());
         let err = run(&a).await.unwrap_err();
         assert!(format!("{err:#}").contains("overlap"), "{err:#}");
         assert!(
             !dir.path().join("run.json").exists(),
             "refused before writing anything"
         );
+    }
+
+    #[tokio::test]
+    async fn malformed_urls_are_refused_before_any_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = args("old-server:/export", "nfs://h/export", dir.path());
+        let err = run(&a).await.unwrap_err();
+        assert!(format!("{err:#}").contains("--src"), "{err:#}");
+        assert!(!dir.path().join("run.json").exists());
     }
 }

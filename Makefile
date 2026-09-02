@@ -4,7 +4,8 @@
 #   make rpm       binary RPM + man page        -> dist/
 #   make deb       binary DEB + man page        -> dist/
 #   make tarball   plain tar.gz (binary + man)  -> dist/
-#   make release   rpm + deb + tarball
+#   make binary    bare binary + SHA256SUMS      -> dist/
+#   make release   rpm + deb + tarball + binary
 #   make clean     remove dist/ (cargo clean is separate)
 #
 # Packages and the tarball are PORTABLE by default: built with
@@ -49,8 +50,12 @@ DIST     := dist
 RPM_OUT  := $(DIST)/mongoose-$(VERSION)-1.$(RPM_ARCH).rpm
 DEB_OUT  := $(DIST)/mongoose_$(VERSION)-1_$(DEB_ARCH).deb
 TAR_OUT  := $(DIST)/mongoose-$(VERSION)-linux-$(UNAME_M).tar.gz
+# Unversioned on purpose: the README's install snippet fetches it via
+# releases/latest/download/, which needs a stable asset name.
+BIN_OUT  := $(DIST)/mongoose-linux-$(UNAME_M)
+SUMS_OUT := $(DIST)/SHA256SUMS
 
-.PHONY: all build build-portable stage-check rpm deb tarball release clean
+.PHONY: all build build-portable stage-check rpm deb tarball binary release clean
 
 all: build
 
@@ -126,10 +131,15 @@ tarball: $(BUILD_RULE) | $(DIST)
 	install -D -m0644 LICENSE $(DIST)/tarroot/LICENSE
 	tar -C $(DIST)/tarroot -czf $(TAR_OUT) .
 
-release: rpm deb tarball
+# --- bare binary -----------------------------------------------------
+binary: $(BUILD_RULE) | $(DIST)
+	install -m0755 $(BIN) $(BIN_OUT)
+
+release: rpm deb tarball binary
+	cd $(DIST) && sha256sum $(notdir $(RPM_OUT) $(DEB_OUT) $(TAR_OUT) $(BIN_OUT)) > $(notdir $(SUMS_OUT))
 	@echo
 	@echo "release artifacts:"
-	@ls -l $(RPM_OUT) $(DEB_OUT) $(TAR_OUT)
+	@ls -l $(RPM_OUT) $(DEB_OUT) $(TAR_OUT) $(BIN_OUT) $(SUMS_OUT)
 
 clean:
 	rm -rf $(DIST)

@@ -1,8 +1,9 @@
 //! `mongoose` binary — parse the CLI and dispatch.
 //!
 //! Exit codes: 0 = success (including a deliberate SIGINT/SIGTERM
-//! stop — resume with `mongoose copy`); 1 = error; 2 = the copy
-//! completed but recorded per-file failures (see `failures/`).
+//! stop — re-run the same command to resume); 1 = error; 2 = the copy
+//! completed but recorded per-file failures (see `failures/` in the
+//! work dir).
 
 use clap::Parser;
 use mongoose::cli::{Cli, Command};
@@ -47,12 +48,8 @@ async fn async_main() -> ExitCode {
         )
         .init();
     let result = match &cli.command {
-        Command::Prepare(args) => mongoose::prepare::run(args).await.map(|_| None),
-        Command::Copy(args) => mongoose::copy::run(&args.work_dir, &args.tuning)
-            .await
-            .map(Some),
-        Command::Run(args) => match mongoose::prepare::run(&args.prepare).await {
-            Ok(_) => mongoose::copy::run(&args.prepare.work_dir, &args.tuning)
+        Command::Copy(args) => match mongoose::prepare::run(args).await {
+            Ok(_) => mongoose::copy::run(&args.work_dir, &args.tuning)
                 .await
                 .map(Some),
             Err(e) => Err(e),

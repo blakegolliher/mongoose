@@ -13,6 +13,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Minimum seconds between scan-progress log lines.
 const SCAN_LOG_SECS: u64 = 10;
 
+/// Target size of each canonical parquet shard. Fixed: it only
+/// shapes checkpoint granularity and memory, never the copy itself.
+pub const SHARD_SIZE_MB: u64 = 512;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanCheckpoint {
     pub complete: bool,
@@ -28,10 +32,7 @@ pub struct ScanCheckpoint {
 pub struct ScanParams {
     pub scan_url: String,
     pub workers: usize,
-    pub shard_size_mb: u64,
     pub exclude: Vec<String>,
-    /// Adopt an existing nfs-walker output instead of scanning.
-    pub scan_dir_override: Option<PathBuf>,
 }
 
 /// Version label of the compiled-in scanner, recorded in the scan
@@ -45,8 +46,8 @@ pub fn embedded_walker_version() -> String {
     format!("nfs-walker {v} (embedded)")
 }
 
-/// Reuse a completed scan checkpoint, adopt an operator-supplied scan
-/// directory, or run the embedded walker into a fresh attempt dir.
+/// Reuse a completed scan checkpoint or run the embedded walker into
+/// a fresh attempt dir.
 pub async fn ensure_scan(wd: &WorkDir, params: &ScanParams) -> Result<ScanCheckpoint> {
     let checkpoint_path = wd.scan_json();
     if let Some(cp) = read_json_opt::<ScanCheckpoint>(&checkpoint_path)? {
@@ -56,46 +57,27 @@ pub async fn ensure_scan(wd: &WorkDir, params: &ScanParams) -> Result<ScanCheckp
         }
     }
 
-    let (scan_dir, walker_version) = match &params.scan_dir_override {
-        Some(dir) => {
-            // Absolute, so the checkpoint survives a resume from
-            // another working directory.
-            let resolved = std::fs::canonicalize(tools::resolve_scan_dir(dir)?)?;
-            println!("  using existing scan {}", resolved.display());
-            (
-                resolved,
-                "unknown (scan supplied with --scan-dir)".to_string(),
-            )
-        }
-        None => {
-            let attempt_dir = wd.next_attempt_dir()?;
-            std::fs::create_dir_all(&attempt_dir)?;
-            let invocation = tools::WalkerInvocation {
-                scan_url: params.scan_url.clone(),
-                output: attempt_dir.join("walk.parquet"),
-                workers: params.workers,
-                exclude: params.exclude.clone(),
-                shard_size_mb: params.shard_size_mb,
-                log: attempt_dir.join("walker-progress.jsonl"),
-            };
-            println!(
-                "  scanning {} -> {} ({} workers, {})",
-                params.scan_url,
-                invocation.output.display(),
-                invocation.workers,
-                embedded_walker_version(),
-            );
-            let stats = run_embedded_walker(&invocation).await?;
-            println!(
-                "  scanned {} dirs, {} files, {} bytes in {:.0?} ({} errors)",
-                stats.dirs, stats.files, stats.bytes, stats.duration, stats.errors,
-            );
-            (
-                tools::resolve_scan_dir(&invocation.output)?,
-                embedded_walker_version(),
-            )
-        }
+    let attempt_dir = wd.next_attempt_dir()?;
+    std::fs::create_dir_all(&attempt_dir)?;
+    let invocation = tools::WalkerInvocation {
+        scan_url: params.scan_url.clone(),
+        output: attempt_dir.join("walk.parquet"),
+        workers: params.workers,
+        exclude: params.exclude.clone(),
+        shard_size_mb: SHARD_SIZE_MB,
+        log: attempt_dir.join("walker-progress.jsonl"),
     };
+    println!(
+        "  scanning {} ({} workers)",
+        params.scan_url, invocation.workers,
+    );
+    let stats = run_embedded_walker(&invocation).await?;
+    println!(
+        "  found {} dirs, {} files, {} bytes in {:.0?} ({} errors)",
+        stats.dirs, stats.files, stats.bytes, stats.duration, stats.errors,
+    );
+    let scan_dir = tools::resolve_scan_dir(&invocation.output)?;
+    let walker_version = embedded_walker_version();
 
     let cp = ScanCheckpoint {
         complete: true,
@@ -108,16 +90,14 @@ pub async fn ensure_scan(wd: &WorkDir, params: &ScanParams) -> Result<ScanCheckp
     Ok(cp)
 }
 
-/// Delete the raw walker scan output under this work dir's `scan/`
-/// (`--purge-intermediates`). Safe once the canonical shards and
-/// manifest are committed: the scan is a pure intermediate that
-/// doubles the index footprint. Only `<wd>/scan/` is removed, so a
-/// `--scan-dir` override outside the work dir is never touched.
+/// Delete the raw walker scan output under this work dir's `scan/`.
+/// Safe once the canonical shards and manifest are committed: the
+/// scan is a pure intermediate that doubles the index footprint.
 /// Best-effort — a failed purge is a warning, never an error.
 pub fn purge_scan_output(wd: &WorkDir) {
     let root = wd.scan_root();
     match std::fs::remove_dir_all(&root) {
-        Ok(()) => println!("  purged scan output {}", root.display()),
+        Ok(()) => tracing::debug!(path = %root.display(), "purged scan output"),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => tracing::warn!(
             error = %e,

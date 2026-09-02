@@ -1,75 +1,105 @@
 # mongoose
 
-Single-host NFS-to-NFS data mover: scan the source with an embedded
-parallel walker, build a canonical parquet index, copy over raw NFSv3
-with libnfs, then resync incrementally while the source stays live and
-finish with a verified cutover. One static-leaning binary, no external
-tools, no coordinator, no S3.
+Copies everything under one NFS path to another NFS path, then keeps
+the copy up to date until you are ready to switch over. One binary for
+Linux x86_64. It speaks NFSv3 directly, so nothing needs to be mounted
+and nothing else needs to be installed.
 
-The full CLI walkthrough — `prepare` / `copy` / `run` / `sync
-[--cutover]`, work-dir layout, resume semantics, correctness posture,
-and v1 limitations — lives in
-[`crates/mongoose/README.md`](crates/mongoose/README.md). The resync
-design (change classification, convergence argument, deletion policy)
-is [`docs/work-items/MONGOOSE_RESYNC.md`](docs/work-items/MONGOOSE_RESYNC.md).
+## Install
 
-## Crates
+Download the binary from the
+[latest release](https://github.com/blakegolliher/mongoose/releases/latest)
+and put it on your PATH:
 
-| crate | role |
+```bash
+curl -LO https://github.com/blakegolliher/mongoose/releases/latest/download/mongoose-linux-x86_64
+chmod +x mongoose-linux-x86_64
+sudo mv mongoose-linux-x86_64 /usr/local/bin/mongoose
+```
+
+The release page also has an `.rpm` and a `.deb` if you prefer a
+package (they add a man page).
+
+Needs Linux x86_64 with glibc 2.34 or newer: RHEL/Rocky/Alma 9+,
+Ubuntu 22.04+, Debian 12+, SLES 15 SP4+. Run it as root: it needs
+reserved ports to talk to the NFS servers.
+
+## Use
+
+Pick a directory for mongoose to keep its notes in (the work dir).
+One job per work dir; reuse it to resume or to sync.
+
+**1. Copy everything.**
+
+```bash
+sudo mongoose copy \
+  --src nfs://old-server/export/data \
+  --dst nfs://new-server/export/data \
+  --work-dir /var/lib/mongoose/data
+```
+
+This scans the source, builds an index, then copies. It prints a
+progress line every 15 seconds. If it stops for any reason (Ctrl-C,
+reboot, network blip), run the same command again and it picks up
+where it left off.
+
+**2. Catch up on what changed while that ran.** Repeat as often as
+you like while people are still using the old server.
+
+```bash
+sudo mongoose sync --work-dir /var/lib/mongoose/data
+```
+
+**3. Switch over.** Stop everything that writes to the old server,
+sync once more, then verify:
+
+```bash
+sudo mongoose sync --work-dir /var/lib/mongoose/data
+sudo mongoose sync --work-dir /var/lib/mongoose/data --cutover
+```
+
+`--cutover` copies nothing. It rescans and fails if anything still
+differs, so a clean exit means the two trees match and the new server
+is ready to use.
+
+## Options
+
+| flag | what it does |
 |---|---|
-| `mongoose` | the CLI: stages, work dir, delta emission, sync driver |
-| `migration-resync` | hash-partitioned scan-vs-scan change classifier |
-| `migration-mover` | libnfs data path: context pools, raw-FH fast path, failure/downgrade records |
-| `migration-worker` | shard processor reused as the copy engine (batching, inflight limits, hardlink groups, dir attrs) |
-| `migration-core` | canonical shard schema, records, shared invocation of the walker/rewrite |
-| `mig-walker-rewrite` | walker output → canonical shards, as a library |
-| `migration-coord`, `migration-control-protocol` | transitive dependencies of the shard processor; mongoose runs no coordinator |
+| `--exclude GLOB` | Skip directories whose name matches, e.g. `--exclude .snapshot`. Repeatable, `copy` only. Remembered in the work dir, so later syncs skip the same things. |
+| `--parallel N` | How much to do at once. Default 32. Drop it (say `--parallel 8`) if the old or new server gets sluggish for other users; raise it (up to 100) if both servers are idle and the copy is slow. Not sticky: stop, re-run with a new value, and the job resumes at that level. |
+| `-v` | More logging (`-vv` for debug). |
 
-The scanner is [nfs-walker](https://github.com/blakegolliher/nfs-walker),
-compiled in as a library and pinned in `crates/mongoose/Cargo.toml`
-(the same commit `packaging/nfs-walker.lock.json` pins).
+## What to expect
 
-## Build
+- **Exit code** 0 means done. 1 means it could not run (bad flags,
+  unreachable server, not root). 2 means it finished but some files
+  failed; the list is under `<work-dir>/failures/`, and the next
+  `sync` retries them.
+- **Everything is preserved**: files, directories, symlinks,
+  hardlinks, owner, mode, and timestamps. For ownership to carry over,
+  the destination export has to let root in (`no_root_squash`), and
+  the source export has to let root read everything.
+- **Deleting on the old server never deletes on the new one.** A sync
+  notices deletions and writes them to
+  `<work-dir>/passes/pass-NNNN/classify/deleted.jsonl`, but leaves the
+  destination alone.
+- **Source and destination must not overlap.** mongoose refuses to
+  start if `--dst` is the same path as `--src`, inside it, or a parent
+  of it on the same server.
+- **Snapshot directories** (`.snapshot`, `.zfs`, and friends) should be
+  excluded; otherwise every snapshot gets copied as real data.
+- NFSv3 only.
 
-Requires libnfs (static `libnfs.a` preferred; see
-`crates/migration-mover/build.rs`). `packaging/libnfs.lock.json` pins
-the known-good libnfs source commit.
+More detail (what lives in the work dir, resume rules, correctness
+posture, known limitations) is in [docs/REFERENCE.md](docs/REFERENCE.md).
+Building from source and cutting a release: [docs/BUILDING.md](docs/BUILDING.md).
 
-```bash
-cargo build --release -p mongoose
-```
+## License
 
-Cross-building for an older glibc (e.g. 2.34 targets) with
-`cargo-zigbuild`: build libnfs.a from the pinned source with
-`zig cc -target x86_64-linux-gnu.2.34`, stage it in a directory, and
-point both link overrides at it:
+MIT. See [LICENSE](LICENSE).
 
-```bash
-VAMOOSE_LIBNFS_DIR=/path/to/stage \
-NFS_WALKER_LIBNFS_DIR=/path/to/stage \
-cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.34 -p mongoose
-```
-
-x86_64 builds need `-C target-feature=+aes,+sse2` (the walker's gxhash
-dependency); the workspace `.cargo/config.toml` sets it, but an
-exported `RUSTFLAGS` overrides that file — keep the flag if you set
-your own.
-
-## Packaging
-
-`make release` produces an RPM, a DEB, and a tarball under `dist/`,
-each installing the binary and the `mongoose(1)` man page. Release
-artifacts are **portable by default**: built with `cargo-zigbuild`
-against glibc 2.34 using a libnfs stage sha256-verified against
-`packaging/libnfs.lock.json` (place the pinned `libnfs.a` +
-`libnfs.so` pair in `packaging/libnfs-stage/`, or point
-`LIBNFS_STAGE` elsewhere), then gated on the binary's maximum
-`GLIBC_*` symbol version. `make rpm PORTABLE=0` packages a host build
-instead — don't ship those.
-
-## Provenance
-
-The engine crates are extracted from the vamoose distributed-migration
-workspace; mongoose is the single-host packaging of that engine with
-S3, claims, fleet coordination, and the TUI removed, plus the resync
-layer on top.
+The release binaries statically include [libnfs](https://github.com/blakegolliher/libnfs)
+(LGPL-2.1-or-later). Its source is the commit pinned in
+`packaging/libnfs.lock.json`; to relink against a modified libnfs,
+build from source as described in `docs/BUILDING.md`.

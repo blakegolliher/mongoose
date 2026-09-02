@@ -1,3 +1,10 @@
+> **Note (v0.2.0):** this is the design record for `mongoose sync`. The
+> command surface it sketches (`mongoose run`, `--cutover-allow-drift`,
+> `--keep-passes`, per-engine tuning flags) predates the v0.2.0 CLI
+> simplification: the shipped surface is `copy` / `sync [--cutover]`
+> with `--exclude` and `--parallel` only. The mechanism described here
+> is unchanged.
+
 # Mongoose resync — single-host converging delta passes
 
 Status: implemented (2026-08-31) — `mongoose sync` with `--cutover`,

@@ -4,7 +4,7 @@ version     = { workspace = true }
 edition     = { workspace = true }
 authors     = { workspace = true }
 license     = { workspace = true }
-description = "Single-host NFS-to-NFS data mover built from the vamoose engine (no S3, no coordinator, no fleet)"
+description = "Copy one NFS path to another and keep it in sync until cutover"
 publish     = false
 
 [lib]

@@ -23,7 +23,7 @@ use crate::manifest::{self, LocalManifest};
 use crate::progress::CopyProgress;
 use crate::scan::{self, ScanParams};
 use crate::util::{raise_fd_limit, read_json_opt, write_json_atomic};
-use crate::workdir::WorkDir;
+use crate::workdir::{RunSpec, WorkDir};
 use anyhow::{Context, Result};
 use base64::Engine;
 use migration_core::prepare_tools as tools;
@@ -39,6 +39,11 @@ pub const DELTA_MANIFEST: &str = "delta-manifest.json";
 /// Hash-partition fan-out for the classifier: bounds join memory at
 /// ~|baseline|/256 rows per bucket.
 const CLASSIFY_BUCKETS: usize = 256;
+
+/// Completed pass dirs to retain; older ones are pruned once the
+/// baseline advances past them. Two = the new baseline plus the one
+/// it was diffed against.
+const KEEP_PASSES: u32 = 2;
 
 /// `baseline.json` — which pass's canonical index the next sync
 /// diffs against. `dir` is work-dir-relative (`"."` = pass 0).
@@ -82,11 +87,16 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
     let wd = WorkDir::new(&args.work_dir);
     let root_manifest = manifest::load(&wd)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "no manifest.json under {}; run `mongoose run` (or prepare + copy) before sync",
+            "no manifest.json under {}; run `mongoose copy` before sync",
             wd.root().display()
         )
     })?;
     migration_core::overlap::check(&root_manifest.source, &root_manifest.dest)?;
+    // The excludes recorded with the job: the rescan must skip exactly
+    // what the copy skipped, or every excluded tree classifies NEW.
+    let exclude = read_json_opt::<RunSpec>(&wd.run_json())?
+        .map(|s| s.exclude)
+        .unwrap_or_default();
 
     let baseline = load_baseline(&wd)?;
     ensure_baseline_copied(&wd, &baseline)?;
@@ -96,7 +106,7 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
         .with_context(|| format!("creating {}", pass_wd.root().display()))?;
 
     println!(
-        "mongoose sync\n  run      {}\n  source   {}\n  dest     {}\n  pass     {pass} (baseline: pass {})\n  work     {}\n",
+        "mongoose sync\n  job      {}\n  source   {}\n  dest     {}\n  pass     {pass} (baseline: pass {})\n  work     {}\n",
         root_manifest.run_id,
         tools::scan_url(&root_manifest.source.url, &root_manifest.source.root),
         tools::scan_url(&root_manifest.dest.url, &root_manifest.dest.root),
@@ -110,10 +120,8 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
         &pass_wd,
         &ScanParams {
             scan_url: tools::scan_url(&root_manifest.source.url, &root_manifest.source.root),
-            workers: args.walker_workers,
-            shard_size_mb: args.shard_size_mb,
-            exclude: args.exclude.clone(),
-            scan_dir_override: args.scan_dir.clone(),
+            workers: args.tuning.walker_workers(),
+            exclude: exclude.clone(),
         },
     )
     .await?;
@@ -152,13 +160,11 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
         let drift = counts.keep_rows + counts.deleted;
         if drift == 0 {
             println!("  cutover: converged (nothing to copy, no deletions)");
-        } else if args.cutover_allow_drift {
-            println!("  cutover: {drift} rows of drift; proceeding (--cutover-allow-drift)");
         } else {
             anyhow::bail!(
                 "cutover found drift: {} new, {} dirty, {} pending, {} deleted. Source \
-                 writers are supposed to be stopped. Run a plain `mongoose sync` to absorb \
-                 the drift and retry, or override with --cutover-allow-drift.",
+                 writers are supposed to be stopped. Run `mongoose sync` without --cutover \
+                 to copy the drift, then retry --cutover.",
                 counts.new,
                 counts.dirty_tuple,
                 counts.dirty_pending,
@@ -214,22 +220,20 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
             dir: format!("passes/pass-{pass:04}"),
         },
     )?;
-    prune_passes(&wd, pass, args.keep_passes.max(1));
+    prune_passes(&wd, pass, KEEP_PASSES);
 
-    if args.purge_intermediates {
-        // The baseline has advanced: this pass's raw scan and its
-        // delta shards are spent. Canonical shards stay — they are
-        // the baseline the next sync classifies against.
-        scan::purge_scan_output(&pass_wd);
-        match std::fs::remove_dir_all(pass_wd.delta_dir()) {
-            Ok(()) => println!("  purged delta shards {}", pass_wd.delta_dir().display()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => tracing::warn!(
-                error = %e,
-                path = %pass_wd.delta_dir().display(),
-                "delta purge failed (non-fatal)",
-            ),
-        }
+    // The baseline has advanced: this pass's raw scan and its delta
+    // shards are spent. Canonical shards stay — they are the baseline
+    // the next sync classifies against.
+    scan::purge_scan_output(&pass_wd);
+    match std::fs::remove_dir_all(pass_wd.delta_dir()) {
+        Ok(()) => tracing::debug!(path = %pass_wd.delta_dir().display(), "purged delta shards"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(
+            error = %e,
+            path = %pass_wd.delta_dir().display(),
+            "delta purge failed (non-fatal)",
+        ),
     }
 
     let deleted_note = if counts.deleted > 0 {

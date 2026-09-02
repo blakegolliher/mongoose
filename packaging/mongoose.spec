@@ -7,7 +7,7 @@ Name:           mongoose
 Version:        %{pkg_version}
 Release:        1%{?dist}
 Summary:        Single-host NFS-to-NFS data mover with incremental resync
-License:        AGPL-3.0-only
+License:        MIT
 URL:            https://github.com/blakegolliher/mongoose
 
 %description
@@ -26,5 +26,10 @@ install -D -m0644 %{_sourcedir}/mongoose.1 %{buildroot}%{_mandir}/man1/mongoose.
 %{_mandir}/man1/mongoose.1*
 
 %changelog
+* Wed Sep 02 2026 Blake Golliher <blakegolliher@gmail.com> - 0.2.0-1
+- Simplified CLI: `copy` and `sync`, one --parallel load knob, paths in URLs.
+- Raw-filehandle fast path is now always on; excludes remembered per job.
+- License changed from AGPL-3.0-only to MIT.
+
 * Tue Sep 01 2026 Blake Golliher <blakegolliher@gmail.com> - 0.1.0-1
 - Initial package: mongoose binary and man page.

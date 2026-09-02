@@ -1,48 +1,45 @@
-//! mongoose — single-host NFS-to-NFS data mover.
+//! mongoose — copy one NFS path to another, then keep it in sync
+//! until cutover.
 //!
-//! A focused front-end over the vamoose engine, shipped as one
-//! binary: the nfs-walker scan and `mig-walker-rewrite` canonical
-//! conversion are compiled in as libraries (the scanner pinned to the
-//! same commit `packaging/nfs-walker.lock.json` pins for vamoose),
+//! A deliberately small front-end over the vamoose engine, shipped
+//! as one binary: the nfs-walker scan and `mig-walker-rewrite`
+//! canonical conversion are compiled in as libraries (the scanner
+//! pinned to the commit `packaging/nfs-walker.lock.json` records),
 //! and the copy path is the same libnfs mover and `ShardProcessor`
-//! dispatch the worker uses — but everything on local disk. No S3, no
-//! claims, no coordinator, no worker fleet, no TUI, no external tools.
+//! dispatch the vamoose worker uses — but everything on local disk.
+//! No S3, no claims, no coordinator, no worker fleet, no TUI, no
+//! external tools, and one load knob instead of the engine's dozen.
 //!
 //! ```text
-//! mongoose prepare   scan + rewrite -> local canonical shards + manifest.json
-//! mongoose copy      process the local shards with the libnfs mover
-//! mongoose run       prepare, then copy
+//! mongoose copy   scan + index (prepare) -> copy every shard (copy)
+//! mongoose sync   rescan -> classify against the last pass -> copy the delta
 //! ```
 //!
 //! ## Work-dir layout
 //!
 //! ```text
 //! <work-dir>/
-//!   run.json                     run identity (sticky across resumes)
-//!   scan/attempt-NNNN/           nfs-walker output + progress log
-//!   scan.json                    scan checkpoint
+//!   run.json                     job identity: source, dest, excludes
+//!   scan.json                    scan checkpoint (raw output is purged
+//!                                once the index is built)
 //!   canonical/part-NNNN.parquet  canonical shards (mig-walker-rewrite)
 //!   rewrite.json                 mig-walker-rewrite's own checkpoint
-//!   manifest.json                local run plan (shard paths are
-//!                                work-dir-relative, never S3 keys)
+//!   manifest.json                local run plan
 //!   progress.json                copy progress + completed-shard list
 //!   failures/part-NNNN.jsonl     per-file failures, per shard
 //!   downgrades/part-NNNN.jsonl   per-file metadata downgrades, per shard
+//!   baseline.json                which pass the next sync diffs against
+//!   passes/pass-NNNN/            one sync pass (same layout, plus
+//!                                classify/ and delta-manifest.json)
 //! ```
 //!
-//! ## Scope (v1 limitations, by design)
-//!
-//! - One-pass migration only; no rsync-style delta or incremental
-//!   comparison, and no automatic torn-copy remediation.
-//! - Single host; no distributed execution, no S3 claims.
-//! - Hardlink fidelity is micro-batch/shard scoped, and directory
-//!   metadata convergence is shard-scoped (same as the vamoose worker).
-//! - NFSv3 via libnfs only; Linux, root, and reserved-port
-//!   expectations are unchanged from vamoose.
+//! See `docs/REFERENCE.md` for resume semantics, the correctness
+//! posture, and the deliberate limitations.
 
 pub mod cli;
 pub mod copy;
 pub mod delta;
+pub mod endpoint;
 pub mod manifest;
 pub mod prepare;
 pub mod progress;
