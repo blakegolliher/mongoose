@@ -5,7 +5,8 @@
 #   make deb       binary DEB + man page        -> dist/
 #   make tarball   plain tar.gz (binary + man)  -> dist/
 #   make binary    bare binary + SHA256SUMS      -> dist/
-#   make release   rpm + deb + tarball + binary
+#   make release   rpm + deb + tarball + binary, then fail-closed compliance gate
+#   make compliance-check  validate checked-in LGPL release policy
 #   make clean     remove dist/ (cargo clean is separate)
 #
 # Packages and the tarball are PORTABLE by default: built with
@@ -55,7 +56,7 @@ TAR_OUT  := $(DIST)/mongoose-$(VERSION)-linux-$(UNAME_M).tar.gz
 BIN_OUT  := $(DIST)/mongoose-linux-$(UNAME_M)
 SUMS_OUT := $(DIST)/SHA256SUMS
 
-.PHONY: all build build-portable stage-check rpm deb tarball binary release clean
+.PHONY: all build build-portable stage-check compliance-check rpm deb tarball binary release clean
 
 all: build
 
@@ -93,6 +94,11 @@ stage-check:
 	[ "$$got_so" = "$$want_so" ] || { echo "ERROR: libnfs.so sha256 $$got_so != pinned $$want_so"; exit 1; }; \
 	[ "$$got_a" = "$$want_a" ] || { echo "ERROR: libnfs.a sha256 $$got_a != pinned $$want_a"; exit 1; }; \
 	echo "libnfs stage verified against $(LIBNFS_LOCK)"
+
+# Fast repository-policy check for local development and CI. The stricter
+# release-mode invocation below validates the exact built artifact set.
+compliance-check:
+	./scripts/check-lgpl-compliance.sh --repo-only
 
 $(DIST):
 	mkdir -p $(DIST)
@@ -136,6 +142,7 @@ binary: $(BUILD_RULE) | $(DIST)
 	install -m0755 $(BIN) $(BIN_OUT)
 
 release: rpm deb tarball binary
+	./scripts/check-lgpl-compliance.sh --release-dir "$(DIST)" --version "$(VERSION)" --binary "$(BIN_OUT)"
 	cd $(DIST) && sha256sum $(notdir $(RPM_OUT) $(DEB_OUT) $(TAR_OUT) $(BIN_OUT)) > $(notdir $(SUMS_OUT))
 	@echo
 	@echo "release artifacts:"

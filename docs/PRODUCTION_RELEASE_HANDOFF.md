@@ -548,6 +548,14 @@ Priority: **P0 / distribution blocker**
 Suggested lead: human release/legal owner. This item requires legal review;
 implementation work can be delegated after the distribution model is chosen.
 
+Decision (2026-09-28): the project owner selected the static-link model to
+preserve the single-binary user experience. `docs/LGPL_COMPLIANCE.md` is the
+normative policy, `AGENTS.md` makes it a repository-wide implementation rule,
+and `make release` now runs a fail-closed artifact gate. **Distribution remains
+blocked** until the embedded license command, corresponding-source bundles,
+relink kit, package contents, and a successful modified-libnfs relink exercise
+satisfy that gate.
+
 ### Problem
 
 The portable binary contains libnfs code and has no dynamic `libnfs` dependency.

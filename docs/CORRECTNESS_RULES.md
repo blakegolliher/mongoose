@@ -115,6 +115,14 @@ an explicit design change.
   and decide what to do with the in-flight bytes — they cannot rely
   on Drop to make the RPC stop.
 
+- **Static libnfs releases fail closed on LGPL compliance.** Mongoose
+  intentionally preserves a single-binary runtime by linking the pinned
+  LGPL-2.1-or-later libnfs build statically. This is permitted only with the
+  notices, exact corresponding source, relinkable work, instructions, and
+  verified relink exercise required by [LGPL_COMPLIANCE.md](LGPL_COMPLIANCE.md).
+  Never publish an artifact that has not passed the release-mode compliance
+  gate. Do not weaken or bypass that gate to make a release succeed.
+
 ## Verification gates
 
 Manual verification against real hardware is a milestone gate. A
@@ -203,4 +211,5 @@ than implementing an older plan implicitly.
   invariants.
 - `docs/CLAIM_PROTOCOL.md` — current S3 claim protocol.
 - `THIRD_PARTY_LICENSES.md` — generated dependency inventory. libnfs is
-  **LGPL-2.1-or-later, dynamic-linked only**.
+  **LGPL-2.1-or-later and intentionally statically linked**; distribution is
+  governed by `docs/LGPL_COMPLIANCE.md` and its fail-closed release gate.
