@@ -1,0 +1,20 @@
+mongoose @VERSION@ release license manifest
+==============================================
+
+mongoose project code
+  License: MIT
+  Source revision: @MONGOOSE_SHA@
+
+libnfs client-library code included by static linking
+  License: LGPL-2.1-or-later
+  Source: @LIBNFS_URL@
+  Source revision: @LIBNFS_SHA@
+  Corresponding source: libnfs-@LIBNFS_SHORT_SHA@-source.tar.gz
+  Relink material: mongoose-@VERSION@-relink-kit.tar.gz
+
+libnfs generated protocol-definition code
+  License: BSD-2-Clause
+
+The complete MIT, LGPL 2.1, and libnfs BSD license texts follow.
+
+--- mongoose MIT license ---

@@ -545,16 +545,18 @@ distinguish a complete migration from one that must be resumed.
 
 Priority: **P0 / distribution blocker**
 
+Status: **Implemented locally on 2026-09-28; owner review required before publication.**
+
 Suggested lead: human release/legal owner. This item requires legal review;
 implementation work can be delegated after the distribution model is chosen.
 
 Decision (2026-09-28): the project owner selected the static-link model to
 preserve the single-binary user experience. `docs/LGPL_COMPLIANCE.md` is the
 normative policy, `AGENTS.md` makes it a repository-wide implementation rule,
-and `make release` now runs a fail-closed artifact gate. **Distribution remains
-blocked** until the embedded license command, corresponding-source bundles,
-relink kit, package contents, and a successful modified-libnfs relink exercise
-satisfy that gate.
+and `make release` now runs a fail-closed artifact gate. The embedded license
+command, exact source bundles, offline vendored relink kit, package notices,
+static-only build path, and automated modified-libnfs relink exercise are now
+implemented. Distribution remains blocked whenever any one of them fails.
 
 ### Problem
 

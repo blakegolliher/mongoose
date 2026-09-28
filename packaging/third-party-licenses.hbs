@@ -1,0 +1,19 @@
+# Rust dependency license texts
+
+This section is generated from the release's locked mongoose dependency graph
+by `cargo-about`. Build dependencies are included; development-only
+dependencies are excluded.
+
+{{#each licenses}}
+## {{name}}
+
+Used by:
+{{#each used_by}}
+- `{{crate.name}} {{crate.version}}`
+{{/each}}
+
+```text
+{{{text}}}
+```
+
+{{/each}}

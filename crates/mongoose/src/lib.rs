@@ -47,6 +47,7 @@ pub mod delta;
 pub mod endpoint;
 pub mod exclude;
 pub mod identity;
+pub mod licenses;
 pub mod manifest;
 pub mod prepare;
 pub mod progress;

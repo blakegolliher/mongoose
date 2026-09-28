@@ -48,6 +48,13 @@ fn main() -> ExitCode {
 
 async fn async_main() -> ExitCode {
     let cli = Cli::parse();
+    if let Command::Licenses(args) = &cli.command {
+        if let Err(error) = mongoose::licenses::write(args.component, std::io::stdout().lock()) {
+            eprintln!("error: could not write license information: {error}");
+            return exit_code_for(ExitOutcome::Fatal);
+        }
+        return exit_code_for(ExitOutcome::Success);
+    }
     // Compact by default: engine libraries (walker, rewrite, shard
     // processor, mover) log at warn; mongoose's own stage lines and
     // progress ticks stay. -v = full info, -vv = debug. RUST_LOG wins
@@ -66,6 +73,7 @@ async fn async_main() -> ExitCode {
     let (work_dir, command_name) = match &cli.command {
         Command::Copy(args) => (&args.work_dir, "mongoose copy"),
         Command::Sync(args) => (&args.work_dir, "mongoose sync"),
+        Command::Licenses(_) => unreachable!("licenses returned before work-dir dispatch"),
     };
     // Keep this guard in scope through dispatch and result reporting. In
     // particular, copy's prepare and copy stages share this one lock.
@@ -103,6 +111,7 @@ async fn async_main() -> ExitCode {
                 ExitOutcome::Success
             }
         }),
+        Command::Licenses(_) => unreachable!("licenses returned before work dispatch"),
     };
 
     match result {

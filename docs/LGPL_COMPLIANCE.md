@@ -71,11 +71,15 @@ LICENSES.txt
 THIRD_PARTY_LICENSES.md
 LIBNFS_SOURCE.md
 RELINK-VERIFICATION.txt
+LICENSE-MIT
+LICENSE-LGPL-2.1.txt
+LICENSE-BSD-2-Clause-libnfs.txt
 ```
 
 RPM, DEB, and the runtime tarball must contain the MIT license, the LGPL 2.1
-text, `THIRD_PARTY_LICENSES.md`, and instructions locating corresponding source
-and the relink kit. Checksums and provenance are handled by the general release
+text, the libnfs BSD text for generated protocol sources,
+`THIRD_PARTY_LICENSES.md`, and instructions locating corresponding source and
+the relink kit. Checksums and provenance are handled by the general release
 gate, not used as a substitute for these materials.
 
 ## Change triggers

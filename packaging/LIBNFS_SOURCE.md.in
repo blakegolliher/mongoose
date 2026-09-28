@@ -1,0 +1,21 @@
+# libnfs corresponding source and relinking
+
+mongoose @VERSION@ statically links libnfs from:
+
+- Repository: <@LIBNFS_URL@>
+- Exact revision: `@LIBNFS_SHA@`
+- Archive in this release: `libnfs-@LIBNFS_SHORT_SHA@-source.tar.gz`
+- Linkage: static (`libnfs.a`)
+- Archive digest used for the official binary: `@LIBNFS_STATIC_SHA@`
+
+The same release provides `mongoose-@VERSION@-source.tar.gz` and
+`mongoose-@VERSION@-relink-kit.tar.gz`. The relink kit contains mongoose,
+libnfs, the pinned nfs-walker source, vendored Rust dependencies, the exact
+toolchain/build settings, and an executable verification script. It can be
+used offline to modify libnfs and relink a replacement mongoose executable.
+
+Release location:
+<https://github.com/blakegolliher/mongoose/releases/tag/v@VERSION@>
+
+There is no restriction on reverse engineering mongoose for the purpose of
+debugging modifications to libnfs. See `RELINKING.md` inside the relink kit.

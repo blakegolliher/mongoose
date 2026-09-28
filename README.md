@@ -129,5 +129,7 @@ MIT. See [LICENSE](LICENSE).
 
 The release binaries statically include [libnfs](https://github.com/blakegolliher/libnfs)
 (LGPL-2.1-or-later). Its source is the commit pinned in
-`packaging/libnfs.lock.json`; to relink against a modified libnfs,
-build from source as described in `docs/BUILDING.md`.
+`packaging/libnfs.lock.json`. Every release carries the exact libnfs source and
+an offline relink kit. Run `mongoose licenses --component libnfs` for the full
+license text, source revision, and matching release-asset names; see
+`docs/BUILDING.md` for the verified replacement procedure.

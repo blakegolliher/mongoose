@@ -1,4 +1,4 @@
-//! Command-line surface: `mongoose copy | sync`.
+//! Command-line surface: `mongoose copy | sync | licenses`.
 //!
 //! Deliberately small. The engine underneath has many knobs (context
 //! pairs, per-size-class inflight limits, raw-FH vs path-based copy,
@@ -55,6 +55,21 @@ pub enum Command {
     /// Repeat while the source is live; finish with --cutover once
     /// source writers are stopped.
     Sync(SyncArgs),
+    /// Show license, source, and relinking information for components
+    /// included in the release binary.
+    Licenses(LicenseArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct LicenseArgs {
+    /// Component whose complete license information should be printed.
+    #[arg(long, value_enum)]
+    pub component: LicenseComponent,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LicenseComponent {
+    Libnfs,
 }
 
 #[derive(Args, Debug)]
@@ -218,5 +233,17 @@ mod tests {
         assert_eq!(cli.verbose, 2);
         let cli = Cli::try_parse_from(["mongoose", "sync", "--work-dir", "/w"]).unwrap();
         assert_eq!(cli.verbose, 0, "compact by default");
+    }
+
+    #[test]
+    fn libnfs_license_command_is_offline_and_explicit() {
+        let cli = Cli::try_parse_from(["mongoose", "licenses", "--component", "libnfs"])
+            .expect("documented license command should parse");
+        let Command::Licenses(args) = cli.command else {
+            panic!("expected licenses");
+        };
+        assert_eq!(args.component, LicenseComponent::Libnfs);
+        assert!(Cli::try_parse_from(["mongoose", "licenses"]).is_err());
+        assert!(Cli::try_parse_from(["mongoose", "licenses", "--component", "unknown"]).is_err());
     }
 }
