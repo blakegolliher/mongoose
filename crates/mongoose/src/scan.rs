@@ -29,9 +29,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Minimum seconds between scan-progress log lines.
 const SCAN_LOG_SECS: u64 = 10;
 
-/// Target size of each canonical parquet shard. Fixed: it only
-/// shapes checkpoint granularity and memory, never the copy itself.
-pub const SHARD_SIZE_MB: u64 = 512;
+// Shard size: the walker writes 512 MiB part files (its built-in
+// default; the flag that set it is gone as of nfs-walker 0.2.0) and
+// the rewrite is 1:1 per part, so that is the canonical shard size.
+// It only shapes checkpoint granularity and memory, never the copy.
 
 /// `scan.json`: the last scan attempt. Reusable only when
 /// [`checkpoint_reusable`] says so.
@@ -195,7 +196,6 @@ pub async fn ensure_scan(wd: &WorkDir, params: &ScanParams) -> Result<ScanCheckp
         output: attempt_dir.join("walk.parquet"),
         workers: params.workers,
         exclude: params.exclude.clone(),
-        shard_size_mb: SHARD_SIZE_MB,
         log: attempt_dir.join("walker-progress.jsonl"),
     };
     println!(
@@ -397,7 +397,6 @@ mod tests {
             output: "/w/scan/attempt-0001/walk.parquet".into(),
             workers: 8,
             exclude: vec![".snapshot".into(), "tmp".into()],
-            shard_size_mb: 256,
             log: "/w/scan/attempt-0001/walker-progress.jsonl".into(),
         };
         let cli = walker_cli(&invocation).expect("embedded CLI accepts prepare's arguments");

@@ -55,6 +55,14 @@ Important dependencies:
 
 Priority: **P0 / release blocker**
 
+Note (2026-09-28): the walker mongoose now pins (nfs-walker main
+merged into `embed-libnfs-override`, 0.2.0) enforces `--exclude`:
+matched entries are neither emitted nor traversed. The pattern is
+still compiled as a regular expression and matched against the full
+path, so the contract mismatch with mongoose's documented `GLOB` on
+the directory name remains, and the acceptance tests below still
+apply.
+
 Suggested lead: LLM implementer in the walker repository; human review of the
 operator-facing matching contract.
 
@@ -113,8 +121,13 @@ walker currently compiles each value as a regular expression.
 Priority: **P0 / release blocker**
 
 Status (2026-09-28): implemented on branch `pr-02-fail-incomplete-scans`
-plus nfs-walker commit on `embed-libnfs-override` (pinned in
-`crates/mongoose/Cargo.toml` and `packaging/nfs-walker.lock.json`).
+plus nfs-walker commit on `embed-libnfs-override`, which was then
+brought up to nfs-walker main (0.2.0) by resolving the conflicts on
+nfs-walker PR #10; mongoose pins the merge commit in
+`crates/mongoose/Cargo.toml` and `packaging/nfs-walker.lock.json`.
+The 0.2.0 walker dropped `--parquet-file-size-mb` (its built-in part
+size is the same 512 MiB), so the shared invocation no longer passes
+it.
 Walker: bounded retry with backoff for transient failures, stale
 handles re-resolved by path, confirmed disappearances counted as
 `vanished` rather than errors, retries only before any row of the

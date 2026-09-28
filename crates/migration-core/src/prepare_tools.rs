@@ -103,7 +103,8 @@ pub struct WalkerInvocation {
     pub output: PathBuf,
     pub workers: usize,
     pub exclude: Vec<String>,
-    pub shard_size_mb: u64,
+    /// The walker sizes its own part files (512 MiB built in, as of
+    /// nfs-walker 0.2.0; the old `--parquet-file-size-mb` flag is gone).
     pub log: PathBuf,
 }
 
@@ -115,8 +116,6 @@ impl WalkerInvocation {
             self.output.clone().into_os_string(),
             "--workers".into(),
             self.workers.to_string().into(),
-            "--parquet-file-size-mb".into(),
-            self.shard_size_mb.to_string().into(),
             "--log".into(),
             self.log.clone().into_os_string(),
             "--log-fmt".into(),
@@ -132,14 +131,7 @@ impl WalkerInvocation {
     /// Every long option [`WalkerInvocation::args`] can emit — what a
     /// scanner must accept for prepare to drive it.
     pub fn long_flags() -> &'static [&'static str] {
-        &[
-            "--output",
-            "--workers",
-            "--parquet-file-size-mb",
-            "--log",
-            "--log-fmt",
-            "--exclude",
-        ]
+        &["--output", "--workers", "--log", "--log-fmt", "--exclude"]
     }
 }
 
@@ -366,7 +358,6 @@ mod tests {
             output: "/w/scan/attempt-0001/walk.parquet".into(),
             workers: 8,
             exclude: vec![".snapshot".into(), "tmp".into()],
-            shard_size_mb: 256,
             log: "/w/scan/attempt-0001/walker.jsonl".into(),
         };
         let args: Vec<String> = inv
@@ -382,8 +373,6 @@ mod tests {
                 "/w/scan/attempt-0001/walk.parquet",
                 "--workers",
                 "8",
-                "--parquet-file-size-mb",
-                "256",
                 "--log",
                 "/w/scan/attempt-0001/walker.jsonl",
                 "--log-fmt",
@@ -440,7 +429,6 @@ mod tests {
             output: "/w/walk.parquet".into(),
             workers: 1,
             exclude: vec!["x".into()],
-            shard_size_mb: 1,
             log: "/w/log".into(),
         };
         for arg in inv.args() {
@@ -483,7 +471,7 @@ Options:
         );
         assert_eq!(
             missing_flags(help, WalkerInvocation::long_flags()),
-            vec!["--parquet-file-size-mb", "--log"]
+            vec!["--log"]
         );
         assert!(missing_flags(help, &["--output", "--exclude"]).is_empty());
     }
