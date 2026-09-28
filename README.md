@@ -100,6 +100,11 @@ destination, or the source, and run `--cutover` again.
 - **Fifos, sockets, and device nodes are not copied.** `--cutover`
   lists any it finds on the source; recreate them on the new server or
   remove them from the old one.
+- **A scan that cannot read every directory fails.** Transient
+  problems are retried; a directory the server will not list (for
+  example one root cannot read) makes `copy` or `sync` stop with the
+  list of directories and exit 1, and nothing is checkpointed, so a
+  subtree can never be silently left out. Fix the cause and re-run.
 - **Source and destination must not overlap.** mongoose refuses to
   start if `--dst` is the same path as `--src`, inside it, or a parent
   of it on the same server. It does not trust the spelling: a server

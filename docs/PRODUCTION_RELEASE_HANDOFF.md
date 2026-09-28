@@ -112,6 +112,22 @@ walker currently compiles each value as a regular expression.
 
 Priority: **P0 / release blocker**
 
+Status (2026-09-28): implemented on branch `pr-02-fail-incomplete-scans`
+plus nfs-walker commit on `embed-libnfs-override` (pinned in
+`crates/mongoose/Cargo.toml` and `packaging/nfs-walker.lock.json`).
+Walker: bounded retry with backoff for transient failures, stale
+handles re-resolved by path, confirmed disappearances counted as
+`vanished` rather than errors, retries only before any row of the
+directory was emitted, every failure in `scans/<id>/errors.jsonl`,
+and `WalkerError::ScanIncomplete` (binary exit 3) instead of `Ok`
+with a counter. mongoose: `scan::accept_scan` / `checkpoint_reusable`
+refuse any errors, the attempt is kept and recorded in `scan.json`
+with `complete: false`, the next run scans afresh, no permissive
+mode. Contract in `docs/REFERENCE.md` "Scan completeness".
+**Hardware gate outstanding:** deny access to one source directory
+and verify nonzero exit, the diagnostic, and no manifest/cutover
+success.
+
 Suggested lead: LLM implementer; human review of which walker errors are
 recoverable inside the walker versus fatal to the scan as a whole.
 

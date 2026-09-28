@@ -8,6 +8,8 @@ on disk, how resume works, what it guarantees, and what it does not do.
 `mongoose copy` runs three stages, each checkpointed under the work dir:
 
 1. **Scan** the source with the embedded nfs-walker (metadata only).
+   The scan is checkpointed only if every directory was read; see
+   [Scan completeness](#scan-completeness).
 2. **Index**: rewrite the scan into canonical parquet shards and write
    `manifest.json`. The raw scan output is deleted once the index is
    verified.
@@ -67,6 +69,9 @@ pruned; delete them by hand once their reports are no longer needed.
   skips every shard listed in `progress.json`. An interrupted shard is
   reprocessed from its first row; copies are idempotent (`.partial`
   then rename), so this is safe.
+- A scan attempt that could not read every directory is never reused:
+  the next run scans afresh into a new `scan/attempt-NNNN/`. The
+  failed attempt stays on disk as evidence.
 - Re-running `sync` resumes the in-flight pass at the same
   granularity. The baseline advance is the commit point; a pass
   interrupted before it re-runs against the old baseline, which at
@@ -100,6 +105,38 @@ pruned; delete them by hand once their reports are no longer needed.
   first row is fully published before the rest link to it.
 - Failures and downgrades are separate JSONL streams, written after
   every shard.
+
+## Scan completeness
+
+An index with a missing subtree is worse than no index: the copy would
+skip the subtree, every later sync would classify the source as
+unchanged there, and a cutover could pass without it. So a scan counts
+only when the walker read every directory.
+
+- The walker retries transient failures (timeouts, connection or RPC
+  trouble, "try again" from the server, stale handles, which are
+  re-resolved by path first) with exponential backoff, up to three
+  retries per directory, and only while nothing from that directory
+  has been written to the index, so a retry can never duplicate rows.
+- A directory that disappears between its parent's listing and its
+  own read is confirmed by LOOKUP and recorded as **vanished**. On a
+  live source that is a race, not a hole: its own entry was already
+  listed, and the next sync sees whatever replaced it. It is not an
+  error, and it cannot happen once writers are stopped.
+- Permission denials and other non-transient errors fail the
+  directory at once.
+
+Any directory still unreadable after that fails the scan. mongoose
+keeps the attempt directory (`scan/attempt-NNNN/`: the part files
+written so far, `walker-progress.jsonl`, and
+`walk.parquet/scans/<id>/errors.jsonl` with one JSON record per
+unreadable or vanished directory), records the attempt in `scan.json`
+with `complete: false` and the counts, prints the first ten
+unreadable directories with their error and attempt count, and exits
+1. Nothing else changes: no index, no manifest, no baseline advance,
+no cutover result. The next `copy`, `sync`, or `sync --cutover` scans
+afresh into a new attempt directory. There is no flag to accept an
+incomplete scan.
 
 ## Endpoint separation
 

@@ -186,6 +186,13 @@ but never propagated to the destination; a
 .B \-\-cutover
 reports them as extras and fails until they are removed.
 .PP
+A scan that cannot read every directory fails the command (exit 1)
+after retrying transient errors; the unreadable directories are listed
+and recorded under the scan attempt, and no checkpoint is written, so
+no subtree is ever silently omitted from a copy, a sync baseline, or a
+cutover. Directories that disappear during a scan of a live source are
+recorded as vanished and are not errors.
+.PP
 Cutover verification does not check directory mtimes (a later commit
 into a directory bumps it), atimes, hardlink sharing (links that span
 shards copy as separate files), or a symlink's own mode, owner, and

@@ -1,9 +1,10 @@
 {
   "schema_version": 1,
   "source_url": "https://github.com/blakegolliher/nfs-walker",
-  "source_git_ref": "experiment/parquet-direct-write",
-  "source_git_sha": "e7181febc02bd1eb340ddd011a7ce1ec890d6e6e",
+  "source_git_ref": "embed-libnfs-override",
+  "source_git_sha": "b04f383c7e40244e3fbcac42bcdb84fab6c262ee",
   "version": "nfs-walker 0.1.0",
-  "artifact_sha256": "a1c6f48f9211cc7bbe5ed472e853a744a567946e8f5549850d852a723a7a6b1b",
-  "target": "x86_64-unknown-linux-gnu.2.34"
+  "artifact_sha256": "2463e266d4235e9349b6e5d0ea9e430bc878ff0d1b9215feb1b47c4fdca3e9a3",
+  "target": "x86_64-unknown-linux-gnu.2.34",
+  "artifact_build": "NFS_WALKER_LIBNFS_DIR=packaging/libnfs-stage cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.34 --no-default-features (max GLIBC symbol 2.34)"
 }

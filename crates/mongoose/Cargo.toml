@@ -26,16 +26,12 @@ parquet            = { workspace = true }
 base64             = { workspace = true }
 
 # The scanner, compiled in so mongoose ships as one binary. Pinned to
-# branch embed-libnfs-override = the SAME commit
-# packaging/nfs-walker.lock.json pins for the vamoose subprocess build
-# (source_git_sha e7181feb) plus one build.rs-only commit adding the
-# NFS_WALKER_LIBNFS_DIR override (needed to cross-link for glibc 2.34
-# without picking up the build host's /usr/local libnfs). Walker
-# *code* is identical to the lock; bump the lock and this rev
-# together. default-features = false drops the optional analytics
-# dashboard (datafusion/axum/rust-embed) — mongoose only needs the
-# walk engine.
-nfs-walker = { git = "https://github.com/blakegolliher/nfs-walker", rev = "64e7dfba6186ceb99bb473e1fd4757a5d8aa1983", default-features = false }
+# branch embed-libnfs-override at the commit
+# packaging/nfs-walker.lock.json records; bump the lock and this rev
+# together (docs/PRODUCTION_RELEASE_HANDOFF.md, PR-01/PR-02).
+# default-features = false drops the optional analytics dashboard
+# (datafusion/axum/rust-embed) — mongoose only needs the walk engine.
+nfs-walker = { git = "https://github.com/blakegolliher/nfs-walker", rev = "b04f383c7e40244e3fbcac42bcdb84fab6c262ee", default-features = false }
 
 tokio              = { workspace = true }
 tokio-util         = { workspace = true }
