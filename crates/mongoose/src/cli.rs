@@ -25,8 +25,8 @@ pub const MAX_PARALLEL: u32 = 100;
     long_about = "mongoose copies everything under one NFS path to another NFS path from a\n\
                   single host, speaking NFSv3 directly (nothing is mounted, nothing else is\n\
                   installed). `copy` does the initial full copy; `sync` copies whatever\n\
-                  changed on the source since the last pass and, with --cutover, verifies\n\
-                  that the two trees match.\n\n\
+                  changed on the source since the last pass and, with --cutover, reads the\n\
+                  destination back to verify that the two trees match.\n\n\
                   Run as root. Re-running a command with the same --work-dir resumes it."
 )]
 pub struct Cli {
@@ -87,8 +87,9 @@ pub struct SyncArgs {
     #[arg(long, value_name = "DIR")]
     pub work_dir: PathBuf,
 
-    /// Final pass: source writers must be stopped. Fails if anything
-    /// still differs, so a clean exit means the trees have converged.
+    /// Final pass: source writers must be stopped. Copies nothing.
+    /// Rescans both trees and reads every file back from both servers;
+    /// fails if anything differs, so a clean exit means the trees match.
     #[arg(long)]
     pub cutover: bool,
 

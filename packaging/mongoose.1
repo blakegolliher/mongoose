@@ -85,8 +85,17 @@ job resumes at the new level.
 .TP
 .B \-\-cutover
 .RB ( sync )
-Final pass: source writers must be stopped. Copies nothing; fails if
-anything still differs, so a clean exit means the trees have converged.
+Final pass: source writers must be stopped. Copies nothing. Rescans the
+source to confirm nothing changed since the last sync, then scans the
+destination and reads every file back from both servers, comparing
+names, types, sizes, owner, mode, file mtimes, symlink targets, and a
+SHA-256 of the contents. Fails if anything differs, so a clean exit
+means the trees match. Takes about as long as reading the whole tree
+from each server once; an interrupted run resumes. On failure the
+report is
+.I verify.json
+in the pass directory it names, with every mismatch in
+.IR verify/mismatches.jsonl .
 .TP
 .BR \-v ", " \-\-verbose
 More logging.
@@ -103,7 +112,9 @@ Success, including a deliberate SIGINT/SIGTERM stop (re-run the same
 command to resume).
 .TP
 .B 1
-Error (bad flags, unreachable export, not root, corrupt index).
+Error (bad flags, unreachable export, not root, corrupt index), or a
+.B \-\-cutover
+whose verification found mismatches.
 .TP
 .B 2
 Copy completed but some files failed; see
@@ -137,6 +148,10 @@ Work-dir layout:
   baseline.json                 which pass the next sync diffs against
   passes/pass-NNNN/             one sync pass (classify results,
                                 deleted.jsonl)
+    verify.json                 cutover verification report
+    verify/mismatches.jsonl     every cutover mismatch
+  passes/pass-NNNN-failed-UTC/  a cutover pass that failed, kept as
+                                evidence (never pruned)
 .fi
 .SH EXAMPLES
 Full copy, then keep it current, then cut over:
@@ -162,8 +177,16 @@ mongoose copy --src ... --dst ... --work-dir ... --parallel 8
 Sync is scan-diff based: each pass is a full metadata rescan diffed
 against the previous pass on (file_type, size, mtime, ctime), with
 whole-file recopy on any mismatch. Deletions are detected and recorded
-but never propagated to the destination. See docs/REFERENCE.md in the
-project for the full correctness posture and limitations.
+but never propagated to the destination; a
+.B \-\-cutover
+reports them as extras and fails until they are removed.
+.PP
+Cutover verification does not check directory mtimes (a later commit
+into a directory bumps it), atimes, hardlink sharing (links that span
+shards copy as separate files), or a symlink's own mode, owner, and
+times (NFSv3 cannot set them). Fifos, sockets, and device nodes are not
+copied and are reported. See docs/REFERENCE.md in the project for the
+full correctness posture and limitations.
 .SH AUTHOR
 Blake Golliher
 .SH LICENSE

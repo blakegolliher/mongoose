@@ -1,9 +1,10 @@
 //! `mongoose` binary — parse the CLI and dispatch.
 //!
 //! Exit codes: 0 = success (including a deliberate SIGINT/SIGTERM
-//! stop — re-run the same command to resume); 1 = error; 2 = the copy
-//! completed but recorded per-file failures (see `failures/` in the
-//! work dir).
+//! stop — re-run the same command to resume); 1 = error, including a
+//! `--cutover` whose destination verification found mismatches (see
+//! `verify.json` in the pass dir it names); 2 = the copy completed but
+//! recorded per-file failures (see `failures/` in the work dir).
 
 use clap::Parser;
 use mongoose::cli::{Cli, Command};

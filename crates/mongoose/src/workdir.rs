@@ -84,6 +84,23 @@ impl WorkDir {
         self.root.join("delta")
     }
 
+    /// `dest/` — the destination index a cutover pass scans, laid out
+    /// like a pass dir of its own (scan/, canonical/, manifest.json).
+    pub fn dest_dir(&self) -> PathBuf {
+        self.root.join("dest")
+    }
+
+    /// `verify/` — cutover verification working state: checkpoints,
+    /// the content work list, and every mismatch record.
+    pub fn verify_dir(&self) -> PathBuf {
+        self.root.join("verify")
+    }
+
+    /// `verify.json` — the cutover verification report.
+    pub fn verify_json(&self) -> PathBuf {
+        self.root.join("verify.json")
+    }
+
     /// Resolve a manifest shard path (work-dir-relative) to an
     /// absolute path.
     pub fn shard_path(&self, relative: &str) -> PathBuf {

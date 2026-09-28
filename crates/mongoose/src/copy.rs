@@ -326,7 +326,9 @@ fn hostname() -> String {
         .unwrap_or_else(|| "mongoose".to_string())
 }
 
-fn spawn_signal_listener(stop: CancellationToken) {
+/// Cancel `stop` on the first SIGINT/SIGTERM; later signals are logged
+/// and ignored. Shared by the copy loop and cutover verification.
+pub(crate) fn spawn_signal_listener(stop: CancellationToken) {
     tokio::spawn(async move {
         let mut term =
             match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {

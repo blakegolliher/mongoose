@@ -58,9 +58,18 @@ sudo mongoose sync --work-dir /var/lib/mongoose/data
 sudo mongoose sync --work-dir /var/lib/mongoose/data --cutover
 ```
 
-`--cutover` copies nothing. It rescans and fails if anything still
-differs, so a clean exit means the two trees match and the new server
-is ready to use.
+`--cutover` copies nothing. It rescans the source to confirm nothing
+changed since the last sync, then scans the new server and reads every
+file back from both servers, comparing names, types, sizes, owner,
+mode, file timestamps, symlink targets, and a SHA-256 of the contents.
+It fails if anything differs, so a clean exit means the two trees
+match and the new server is ready to use. Expect it to take about as
+long as reading the whole tree from each server once; re-run it after
+an interruption and it resumes.
+
+If it fails, it prints where the report is (`verify.json` plus a full
+`verify/mismatches.jsonl` in the pass directory it names). Fix the
+destination, or the source, and run `--cutover` again.
 
 ## Options
 
@@ -73,17 +82,24 @@ is ready to use.
 ## What to expect
 
 - **Exit code** 0 means done. 1 means it could not run (bad flags,
-  unreachable server, not root). 2 means it finished but some files
-  failed; the list is under `<work-dir>/failures/`, and the next
-  `sync` retries them.
+  unreachable server, not root) or, for `--cutover`, that the trees
+  do not match. 2 means it finished but some files failed; the list is
+  under `<work-dir>/failures/`, and the next `sync` retries them.
 - **Everything is preserved**: files, directories, symlinks,
-  hardlinks, owner, mode, and timestamps. For ownership to carry over,
-  the destination export has to let root in (`no_root_squash`), and
-  the source export has to let root read everything.
+  hardlinks, owner, mode, and file timestamps. For ownership to carry
+  over, the destination export has to let root in (`no_root_squash`),
+  and the source export has to let root read everything. Directory
+  timestamps are restored on a best-effort basis and are not part of
+  what `--cutover` checks.
 - **Deleting on the old server never deletes on the new one.** A sync
   notices deletions and writes them to
   `<work-dir>/passes/pass-NNNN/classify/deleted.jsonl`, but leaves the
-  destination alone.
+  destination alone. Anything on the new server that is not on the old
+  one, including those leftovers, makes `--cutover` fail until you
+  remove it.
+- **Fifos, sockets, and device nodes are not copied.** `--cutover`
+  lists any it finds on the source; recreate them on the new server or
+  remove them from the old one.
 - **Source and destination must not overlap.** mongoose refuses to
   start if `--dst` is the same path as `--src`, inside it, or a parent
   of it on the same server.

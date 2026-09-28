@@ -13,6 +13,9 @@
 //! ```text
 //! mongoose copy   scan + index (prepare) -> copy every shard (copy)
 //! mongoose sync   rescan -> classify against the last pass -> copy the delta
+//! mongoose sync --cutover
+//!                 rescan -> classify (must be clean) -> scan the dest
+//!                 -> verify it against the source, bytes included (verify)
 //! ```
 //!
 //! ## Work-dir layout
@@ -30,7 +33,9 @@
 //!   downgrades/part-NNNN.jsonl   per-file metadata downgrades, per shard
 //!   baseline.json                which pass the next sync diffs against
 //!   passes/pass-NNNN/            one sync pass (same layout, plus
-//!                                classify/ and delta-manifest.json)
+//!                                classify/ and delta-manifest.json;
+//!                                a cutover pass adds dest/, verify/,
+//!                                and verify.json)
 //! ```
 //!
 //! See `docs/REFERENCE.md` for resume semantics, the correctness
@@ -46,4 +51,5 @@ pub mod progress;
 pub mod scan;
 pub mod sync;
 pub mod util;
+pub mod verify;
 pub mod workdir;

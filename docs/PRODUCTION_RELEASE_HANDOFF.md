@@ -158,6 +158,17 @@ classification can appear stable and cutover can succeed without that subtree.
 
 Priority: **P0 / release blocker**
 
+Status (2026-09-28): implemented on branch `pr-03-cutover-verification`.
+Product decision: keep the strong `--cutover` name and implement full
+byte verification; no sampled or metadata-only mode. The verification
+contract, including what is deliberately outside it (directory
+mtimes, atimes, hardlink topology, symlink attrs, root attrs), is
+documented in `docs/REFERENCE.md` "Cutover verification". Software
+acceptance tests are in `crates/mongoose/src/verify/` and
+`crates/mongoose/tests/sync_pipeline.rs`. **Hardware gate outstanding:**
+real NFSv3 exports, at least one multi-gigabyte file, concurrent
+directory fan-out, and the excluded-subtree check on a real export.
+
 Suggested lead: human design owner, with LLM implementation support.
 
 ### Problem

@@ -130,10 +130,15 @@ intact, `row_count` updated) and original `row_id`s, so
 `ShardReader`'s validation holds on delta shards. The full pass
 index is the pass dir's `manifest.json`; the delta is
 `delta-manifest.json`, consumed by the unchanged copy loop via a
-manifest-name parameter. Cutover is implemented as the
-zero-drift-or-fail gate (drift = keep_rows + deleted) with
-`--cutover-allow-drift` to absorb instead; FILE_SYNC opens and hash
-re-verify remain future work as designed.
+manifest-name parameter. Cutover was first implemented as the
+zero-drift-or-fail gate alone (drift = keep_rows + deleted);
+`--cutover-allow-drift` was dropped in the v0.2.0 CLI simplification.
+**[implemented 2026-09-28, PR-03]** the zero-drift gate is now gate 1
+of two: gate 2 scans the destination and verifies it against the
+source index, including a full SHA-256 read-back of every file and a
+READLINK of every symlink on both sides (`crates/mongoose/src/verify/`,
+`docs/REFERENCE.md` "Cutover verification"). The baseline advances
+only when both gates pass.
 
 ### Classifier mechanics
 
@@ -157,13 +162,25 @@ extraction pattern as `prepare_tools` and `mover_factory`.
 `mongoose sync --cutover` after stopping source writers:
 
 - Classifier must produce **zero** NEW/DIRTY/DELETED beyond the
-  pending set; any drift fails the pass loudly
-  (`--cutover-allow-drift` to override), same invariant as the
-  fleet design.
-- v1 cutover is that invariant plus a normal (possibly empty) delta
-  copy. FILE_SYNC-stability opens and hash re-verify
-  (`--cutover-verify`) remain future work tied to the bucketed
-  async path, which is the only mover that computes `file_hash`.
+  pending set; any drift fails the pass loudly, same invariant as
+  the fleet design. (`--cutover-allow-drift` was removed with the
+  v0.2.0 CLI simplification: the drift must be copied by a plain
+  `sync` first.)
+- **[superseded 2026-09-28]** v1 cutover was that invariant alone,
+  with hash re-verify deferred to the bucketed async path. That
+  proved only source quiescence, never the destination, and did not
+  support the README's "the trees match" claim (production readiness
+  review, PR-03). The product decision was to keep the strong
+  `--cutover` name and implement byte verification rather than
+  narrow the claim to "metadata-converged": cutover now also scans
+  the destination with the same walker and excludes, joins it against
+  the source index (namespace, type, size, mode, owner, file mtime),
+  reads every file back from both servers over the sync libnfs pool
+  and compares SHA-256, and READLINKs every symlink on both sides. No
+  sampled or metadata-only mode exists; a weaker check would need a
+  distinct name and result. Mismatches are persisted
+  (`verify.json` + `verify/mismatches.jsonl`), the failed pass is
+  moved aside as evidence, and the baseline does not advance.
 
 ---
 
@@ -196,8 +213,9 @@ steady-state overhead ≈ 2 indexes (~80 GB at 600M files).
 - **Tuple granularity.** A change invisible to `(size, mtime,
   ctime)` — requires the server to report identical ctime across a
   modification, e.g. sub-granularity double-write — is missed by
-  scan-diff and converged by nothing except `--cutover-verify`
-  (future). Same posture as the fleet design.
+  scan-diff. It is caught by the cutover byte verification (which
+  reads both sides), and converged by a plain `sync` only once the
+  tuple moves. Same scan-diff posture as the fleet design.
 - **Renames copy, not move.** A rename classifies as DELETED (old
   path, recorded only) + NEW (new path, recopied). Inode-based
   rename detection is a possible later optimization, not v1.

@@ -24,6 +24,12 @@ the baseline. Rows that failed or tore in the previous pass are forced
 into the delta until they succeed. Design notes:
 [work-items/MONGOOSE_RESYNC.md](work-items/MONGOOSE_RESYNC.md).
 
+`mongoose sync --cutover` runs the same rescan and classification as
+a gate (the source must show nothing to copy and no deletions), then
+scans the destination and verifies it against the source index; see
+[Cutover verification](#cutover-verification). Only a clean
+verification advances the baseline.
+
 ## Work-dir layout
 
 ```
@@ -41,10 +47,19 @@ into the delta until they succeed. Design notes:
   passes/pass-NNNN/             one sync pass: same layout as above, plus
     classify/                   keep lists, deleted.jsonl, classify.json
     delta-manifest.json         the new+changed subset that was copied
+    dest/                       (--cutover) the destination index: scan
+                                checkpoint, canonical shards, manifest
+    verify/                     (--cutover) namespace.json, the content
+                                work list and its progress checkpoint,
+                                mismatches.jsonl (every mismatch)
+    verify.json                 (--cutover) the verification report
+  passes/pass-NNNN-failed-UTC/  a cutover pass whose verification
+                                failed, moved aside with its evidence
 ```
 
 The two most recent completed passes are kept; older pass dirs are
-pruned when the baseline advances.
+pruned when the baseline advances. Failed cutover passes are never
+pruned; delete them by hand once their reports are no longer needed.
 
 ## Resume
 
@@ -59,6 +74,12 @@ pruned when the baseline advances.
 - SIGINT/SIGTERM stops at the next batch boundary; no file is ever
   interrupted mid-copy. A second signal is ignored (SIGKILL abandons
   the batch).
+- Re-running `sync --cutover` after an interruption reuses both scans
+  and resumes the content read-back at its last durable checkpoint
+  (`verify/content-progress.json`, written every 15 seconds). A
+  cutover whose verification *failed* is not resumed: its pass dir is
+  moved to `passes/pass-NNNN-failed-<utc>/` and the next run starts
+  pass NNNN afresh, so a fix on either side is re-scanned.
 - `--parallel` is not part of the job identity; change it freely
   between runs.
 
@@ -79,21 +100,92 @@ pruned when the baseline advances.
 - Failures and downgrades are separate JSONL streams, written after
   every shard.
 
+## Cutover verification
+
+A clean `mongoose sync --cutover` is the statement "the destination
+matches the source". It is proved in two independent gates, and the
+baseline advances only when both pass:
+
+1. **Source quiescence.** The rescan classifies against the previous
+   baseline and must find nothing to copy (no NEW, DIRTY, or pending
+   rows) and no deletions. This proves the last sync caught every
+   change and that no failed or torn copy is outstanding. It says
+   nothing about the destination.
+2. **Destination verification.** The destination is scanned with the
+   same embedded walker and the same excludes, rewritten to canonical
+   shards under `passes/pass-NNNN/dest/`, and joined against the
+   source index by path. Then every file is read in full from both
+   servers and its SHA-256 compared, and every symlink is READLINKed
+   on both sides. The read-back uses one libnfs context pair per
+   `--parallel`, so it costs roughly one full read of the tree from
+   each server.
+
+What is compared, per entry present in the source index:
+
+| entry     | compared |
+|-----------|----------|
+| file      | present on the destination, same type, size, mode bits (`mode & 07777`), owner, mtime (to the microsecond `utimes` carries), and SHA-256 of the bytes |
+| directory | present, same type, mode bits, owner |
+| symlink   | present, same type, target bytes |
+| fifo, socket, device | reported as `special_not_copied`; mongoose does not copy them, so they can never match. Recreate them on the destination or remove them from the source |
+
+and every destination path must exist in the source; an extra fails,
+including entries the no-delete policy left behind and any stale
+`.partial` file from an interrupted copy.
+
+Mode, owner, and mtime are compared only when the job preserved them
+(all three are on by default); the report records which were in
+force. A source attribute the walker could not read (null uid, gid,
+or mtime) was never applied and is not compared. A metadata mismatch
+does not suppress the content read, so one run reports everything.
+
+Deliberately outside the contract, because the copy engine does not
+guarantee them:
+
+- directory mtimes (any later commit into a directory bumps it; the
+  final restamp is best-effort);
+- atimes;
+- hardlink topology (links that span shards copy as separate files;
+  the bytes at each path are still verified);
+- a symlink's own mode, owner, and times (NFSv3 has no lchmod, and
+  lutimes is best-effort);
+- the migration root's own attributes (the walker emits no row for
+  it; both roots were scanned, so both exist).
+
+On failure the pass dir is moved to `passes/pass-NNNN-failed-<utc>/`
+and the command exits 1 without advancing the baseline. Inside it,
+`verify.json` holds the status, the contract in force, per-kind counts
+(`missing`, `extra`, `special_not_copied`, `file_type`, `size`,
+`mode`, `owner`, `mtime`, `symlink_target`, `content`, `read_error`),
+and the first 100 mismatch records; `verify/mismatches.jsonl` holds
+every record, one JSON object per line with `path_b64` (lossless),
+`path_lossy` (display only), `kind`, and `expected`/`actual`/`detail`
+where they apply. A `read_error` means one side could not be read and
+nothing was proved about that path. The report's `mode` field is
+`full`; there is no sampled or metadata-only variant.
+
+Preconditions the tool cannot check: source writers must really be
+stopped, and the destination must not be written by anything else.
+A file created on the source after the rescan is in neither index and
+is not detected.
+
 ## Limitations (deliberate)
 
 - Change detection is scan-diff on `(file_type, size, mtime, ctime)`,
   with whole-file recopy on any mismatch. A content rewrite with
-  identical size inside the server's ctime granularity is missed. The
-  cutover pass's zero-drift check is the convergence gate, not a
-  byte-level verify.
+  identical size inside the server's ctime granularity is missed by
+  `sync`; it is caught by the byte verification of `--cutover`.
 - Deletions are recorded (`classify/deleted.jsonl`) but never
   propagated to the destination. Renames therefore copy as
   delete+create.
 - Hardlink fidelity is shard-scoped: links that span shards copy as
-  separate files.
+  separate files. Cutover verifies the bytes at every path, not the
+  sharing.
 - A directory whose children land in a different shard can end with a
   bumped mtime; the migration root itself is re-stamped at the end of
-  a complete run.
+  a complete run. Directory mtimes are outside the cutover contract.
+- Fifos, sockets, and device nodes are not copied; cutover reports
+  them.
 - Single host, NFSv3 via libnfs only, Linux, root.
 
 ## Exit codes
@@ -101,7 +193,7 @@ pruned when the baseline advances.
 | code | meaning |
 |------|---------|
 | 0    | success, including a deliberate SIGINT/SIGTERM stop (re-run to resume) |
-| 1    | error (bad flags, missing index, unreachable export, corrupt shard) |
+| 1    | error (bad flags, missing index, unreachable export, corrupt shard), or a `--cutover` whose verification found mismatches |
 | 2    | copy completed but recorded per-file failures (see `failures/`) |
 
 ## Environment
