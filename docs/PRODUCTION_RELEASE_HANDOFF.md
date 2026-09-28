@@ -238,6 +238,20 @@ Implementation requirements:
 
 Priority: **P0 / release blocker because failure can destroy source data**
 
+Status (2026-09-28): implemented on branch `pr-04-endpoint-identity`.
+Three layers (`crates/mongoose/src/endpoint.rs`, `identity.rs`):
+canonical spelling, name resolution, and mounted identity (peer
+address, root filehandle, `(fsid, fileid)`, ancestor chain, a
+probe for filehandle matches across apparently different servers,
+and a source-index search for an aliased destination root). Re-run
+from recorded job state on every `copy`, `sync`, and cutover;
+hand-edited manifests go through the same parser; the per-file
+check now compares server-absolute paths whenever the servers may be
+one, with no override. Contract and residual gap in
+`docs/REFERENCE.md` "Endpoint separation". **Hardware gate
+outstanding:** two names for one NFS server, sibling paths on one
+export, two exports on one server, and the no-CREATE assertion.
+
 Suggested lead: human design owner familiar with NFSv3 identity and libnfs;
 mixed implementation.
 

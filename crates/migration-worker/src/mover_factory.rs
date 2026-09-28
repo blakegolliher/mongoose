@@ -42,6 +42,9 @@ pub struct MoverParams {
     pub require_unchanged_size: bool,
     pub inflight: InflightProfile,
     pub host_id: String,
+    /// Source and destination may be one server: enables the
+    /// per-file self-target check. See `MoverConfig::same_server`.
+    pub same_server: bool,
 }
 
 /// The built mover plus the sync context pool, which callers keep for
@@ -67,6 +70,7 @@ pub fn mover_config(p: &MoverParams) -> MoverConfig {
     cfg.direct_commit = p.direct_commit;
     cfg.rpc_timeout_ms = p.rpc_timeout_ms;
     cfg.inflight = p.inflight;
+    cfg.same_server = p.same_server;
     cfg
 }
 
@@ -182,6 +186,7 @@ mod tests {
                 large_stripe_depth: 32,
             },
             host_id: "host-t".into(),
+            same_server: true,
         }
     }
 
@@ -189,6 +194,10 @@ mod tests {
     fn mover_config_projects_every_knob() {
         let p = params();
         let cfg = mover_config(&p);
+        assert!(
+            cfg.same_server,
+            "identity verdict reaches the per-file check"
+        );
         assert_eq!(cfg.source_url, "nfs://src/export");
         assert_eq!(cfg.dest_url, "nfs://dst/export");
         assert_eq!(cfg.source_root, "/data");

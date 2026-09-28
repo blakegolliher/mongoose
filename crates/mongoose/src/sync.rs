@@ -38,6 +38,8 @@
 
 use crate::cli::{SyncArgs, Tuning};
 use crate::copy::{self, CopySummary};
+use crate::endpoint::{self, NameEvidence};
+use crate::identity;
 use crate::manifest::{self, LocalManifest};
 use crate::progress::CopyProgress;
 use crate::scan::{self, ScanParams};
@@ -119,7 +121,13 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
             wd.root().display()
         )
     })?;
-    migration_core::overlap::check(&root_manifest.source, &root_manifest.dest)?;
+    // Endpoint separation from the recorded job state, every run:
+    // layers 1 and 2 here; layer 3 in the delta copy and before the
+    // cutover read-back (both mount).
+    let src_url = endpoint::parse("manifest source.url", &root_manifest.source.url)?;
+    let dst_url = endpoint::parse("manifest dest.url", &root_manifest.dest.url)?;
+    endpoint::check_overlap(&src_url, &dst_url)?;
+    let names = endpoint::check_overlap_resolved(&src_url, &dst_url)?;
     // The excludes recorded with the job: the rescan must skip exactly
     // what the copy skipped, or every excluded tree classifies NEW.
     let exclude = read_json_opt::<RunSpec>(&wd.run_json())?
@@ -215,6 +223,7 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
             &exclude,
             &args.tuning,
             steps,
+            (&src_url, &dst_url, &names),
         )
         .await?;
         match report.status {
@@ -370,7 +379,10 @@ pub fn dest_scan_params(root: &LocalManifest, exclude: &[String], tuning: &Tunin
 
 /// Cutover gate 2: scan the destination into `<pass>/dest/`, then run
 /// (or resume) the verification of it against this pass's source
-/// index. Mounts one libnfs pair per `--parallel` for the read-back.
+/// index. Mounts one libnfs pair per `--parallel` for the read-back,
+/// and proves endpoint separation on it first: verifying a tree
+/// against itself would pass.
+#[allow(clippy::too_many_arguments)]
 async fn cutover_verify(
     pass_wd: &WorkDir,
     pass: u32,
@@ -379,6 +391,7 @@ async fn cutover_verify(
     exclude: &[String],
     tuning: &Tuning,
     steps: usize,
+    endpoints: (&endpoint::NfsUrl, &endpoint::NfsUrl, &NameEvidence),
 ) -> Result<VerifyReport> {
     let dest_wd = WorkDir::new(pass_wd.dest_dir());
     std::fs::create_dir_all(dest_wd.root())
@@ -412,6 +425,16 @@ async fn cutover_verify(
         &root.dest.root,
         tuning.parallel.max(1) as usize,
     )?;
+    let source_shards: Vec<PathBuf> = full
+        .shards
+        .iter()
+        .map(|s| pass_wd.shard_path(&s.path))
+        .collect();
+    let (src_url, dst_url, names) = endpoints;
+    let separation =
+        identity::prove_separation(&checker.pool(), src_url, dst_url, names, &source_shards)
+            .await?;
+    println!("  endpoints: {}", separation.evidence);
     let stop = CancellationToken::new();
     copy::spawn_signal_listener(stop.clone());
     let params = VerifyParams {
@@ -420,11 +443,7 @@ async fn cutover_verify(
         source: root.source.clone(),
         dest: root.dest.clone(),
         options: root.options.clone(),
-        source_shards: full
-            .shards
-            .iter()
-            .map(|s| pass_wd.shard_path(&s.path))
-            .collect(),
+        source_shards,
         dest_shards: dest_index
             .shards
             .iter()

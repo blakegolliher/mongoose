@@ -102,7 +102,11 @@ destination, or the source, and run `--cutover` again.
   remove them from the old one.
 - **Source and destination must not overlap.** mongoose refuses to
   start if `--dst` is the same path as `--src`, inside it, or a parent
-  of it on the same server.
+  of it on the same server. It does not trust the spelling: a server
+  named two ways (hostname and IP address, two DNS aliases, a spelled
+  or default port) is still one server, and before the first file is
+  written it asks both servers which directory each mount really is
+  and refuses if the two are the same or nested. There is no override.
 - **Snapshot directories** (`.snapshot`, `.zfs`, and friends) should be
   excluded; otherwise every snapshot gets copied as real data.
 - NFSv3 only.

@@ -494,6 +494,13 @@ impl LibnfsChecker {
     }
 }
 
+impl LibnfsChecker {
+    /// The mounted pool, for the endpoint identity check.
+    pub fn pool(&self) -> Arc<dyn LibnfsContextPool> {
+        self.pool.clone()
+    }
+}
+
 fn fmt_err(e: migration_mover::MoveError) -> String {
     format!("{} during {:?}", e.error, e.phase)
 }

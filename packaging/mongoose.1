@@ -62,7 +62,12 @@ Where to copy from:
 Where to copy to:
 .IR nfs://server/export[/path] .
 Refused if it is the same path as the source, inside it, or a parent
-of it on the same server.
+of it on the same server. Two spellings of one server (name and
+address, aliases, a spelled or default port, option order) count as
+one server, and before the first destination write mongoose asks both
+servers which directory each mount is (connected address, root
+filehandle, ancestry) and refuses if the roots are the same or nested.
+Re-checked on every run from the recorded job; no override.
 .TP
 .BI \-\-work\-dir " DIR"
 Local directory for this job's index, checkpoints, and results. One job

@@ -139,13 +139,17 @@ pub struct RunSpec {
 }
 
 /// Write the run spec on first use; on resume, refuse a spec that
-/// names a different source, destination, or exclude set.
+/// names a different source, destination, or exclude set. URLs are
+/// compared in canonical form, so a work dir recorded before
+/// canonicalization (or with another spelling of the same name) still
+/// resumes.
 pub fn ensure_run_spec(path: &Path, fresh: RunSpec) -> Result<RunSpec> {
     match read_json_opt::<RunSpec>(path)? {
         Some(existing) => {
-            let same_endpoints = existing.source.url == fresh.source.url
+            let same_endpoints = canonical_url(&existing.source.url)
+                == canonical_url(&fresh.source.url)
                 && existing.source.root == fresh.source.root
-                && existing.dest.url == fresh.dest.url
+                && canonical_url(&existing.dest.url) == canonical_url(&fresh.dest.url)
                 && existing.dest.root == fresh.dest.root;
             if !same_endpoints {
                 anyhow::bail!(
@@ -179,6 +183,14 @@ pub fn ensure_run_spec(path: &Path, fresh: RunSpec) -> Result<RunSpec> {
             Ok(fresh)
         }
     }
+}
+
+/// Canonical spelling for identity comparison; an unparseable URL
+/// compares as itself.
+fn canonical_url(url: &str) -> String {
+    crate::endpoint::parse("url", url)
+        .map(|u| u.url())
+        .unwrap_or_else(|_| url.to_string())
 }
 
 fn sorted(v: &[String]) -> Vec<&str> {
@@ -268,6 +280,25 @@ mod tests {
         moved.dest.url = "nfs://d/elsewhere".into();
         let err = ensure_run_spec(&path, moved).unwrap_err();
         assert!(format!("{err:#}").contains("--work-dir"));
+    }
+
+    #[test]
+    fn run_spec_compares_urls_canonically() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.json");
+        let mut recorded = spec();
+        recorded.source.url = "nfs://Old.Example.COM:2049/export/".into();
+        ensure_run_spec(&path, recorded.clone()).unwrap();
+        let mut again = spec();
+        again.source.url = "nfs://old.example.com./export".into();
+        assert_eq!(
+            ensure_run_spec(&path, again).unwrap(),
+            recorded,
+            "same server, resumes"
+        );
+        let mut other = spec();
+        other.source.url = "nfs://old2.example.com/export".into();
+        assert!(ensure_run_spec(&path, other).is_err());
     }
 
     #[test]

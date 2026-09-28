@@ -146,6 +146,15 @@ pub struct MoverConfig {
     /// [`crate::libnfs::DEFAULT_RPC_TIMEOUT_MS`] by `from_options`;
     /// the orchestrator overrides it from `[mover] rpc_timeout_ms`.
     pub rpc_timeout_ms: u32,
+    /// Source and destination may be the same NFS server, so a
+    /// destination path can collide with a source path. Enables the
+    /// per-file self-target check, which then compares
+    /// server-absolute paths (export + root + row path). `from_options`
+    /// seeds it from URL string equality; a front end with a stronger
+    /// identity check (mongoose: canonical host, DNS, mounted root
+    /// identity) overrides it. Never set to false to silence the
+    /// check — a false negative here truncates source files.
+    pub same_server: bool,
 }
 
 impl MoverConfig {
@@ -156,6 +165,7 @@ impl MoverConfig {
         dest_root: String,
         opts: &MigrationOptions,
     ) -> Self {
+        let same_server = source_url == dest_url;
         Self {
             source_url,
             dest_url,
@@ -168,8 +178,30 @@ impl MoverConfig {
             use_raw_fh: false,
             direct_commit: false,
             rpc_timeout_ms: crate::libnfs::DEFAULT_RPC_TIMEOUT_MS,
+            same_server,
         }
     }
+}
+
+/// The export path a libnfs URL mounts, as bytes without any `?opts`
+/// suffix: the prefix that turns a mount-relative path into the path
+/// the server sees. `/` (or an unparseable URL) yields an empty
+/// prefix so `abs_server_path` is the identity.
+pub fn export_prefix(url: &str) -> Vec<u8> {
+    let export = crate::libnfs::parse_nfs_url(url)
+        .map(|(_, e)| e)
+        .unwrap_or_default();
+    let export = export.split('?').next().unwrap_or("");
+    export.trim_end_matches('/').as_bytes().to_vec()
+}
+
+/// `export_prefix + mount-relative path`: the server-absolute path,
+/// comparable between two mounts of the same server.
+pub fn abs_server_path(export: &[u8], path: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(export.len() + path.len());
+    out.extend_from_slice(export);
+    out.extend_from_slice(path);
+    out
 }
 
 /// The mover. Holds long-lived resources: libnfs context pool, the
@@ -189,6 +221,10 @@ pub struct Mover {
     pid: u32,
     downgrades: DowngradeSink,
     fence: Fence,
+    /// Export prefixes of the two mounts ([`export_prefix`]), for the
+    /// server-absolute per-file self-target comparison.
+    src_export: Arc<[u8]>,
+    dst_export: Arc<[u8]>,
     /// Destination directories confirmed present, shared across all
     /// blocking copies. Entries are only added after a successful
     /// `mkdir_p`, and nothing removes destination directories during a
@@ -415,6 +451,8 @@ impl Mover {
         downgrades: DowngradeSink,
         fence: Fence,
     ) -> Self {
+        let src_export: Arc<[u8]> = export_prefix(&cfg.source_url).into();
+        let dst_export: Arc<[u8]> = export_prefix(&cfg.dest_url).into();
         Self {
             cfg: Arc::new(cfg),
             pool,
@@ -422,6 +460,8 @@ impl Mover {
             pid: std::process::id(),
             downgrades,
             fence,
+            src_export,
+            dst_export,
             dirs_known: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             dir_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             src_dir_fhs: Arc::new(FhCache::default()),
@@ -791,22 +831,26 @@ impl Mover {
     /// when `nfs_create` opens with `O_TRUNC`.
     ///
     /// Returns Err with tag `SELF_TARGET` on collision. Only meaningful
-    /// when source and dest URLs match — different servers can never
-    /// collide regardless of path. Belt-and-suspenders against the
-    /// startup overlap guard in the worker; either alone is
-    /// insufficient.
+    /// when both mounts may be the same server
+    /// (`MoverConfig::same_server`); paths are then compared as
+    /// server-absolute paths so two different mounts of one server
+    /// (`nfs://h/export` and `nfs://h/export/backup`) compare
+    /// correctly. Belt-and-suspenders against the startup overlap
+    /// guard; either alone is insufficient.
     fn check_self_target(
         &self,
         src: &[u8],
         dst: &[u8],
         dst_partial: &[u8],
     ) -> Result<(), MoveError> {
+        if !self.cfg.same_server {
+            return Ok(());
+        }
         check_self_target(
-            &self.cfg.source_url,
-            &self.cfg.dest_url,
-            src,
-            dst,
-            dst_partial,
+            true,
+            &abs_server_path(&self.src_export, src),
+            &abs_server_path(&self.dst_export, dst),
+            &abs_server_path(&self.dst_export, dst_partial),
         )
     }
 
@@ -1439,14 +1483,15 @@ fn parent_dir(p: &[u8]) -> &[u8] {
 /// Free-function form of the per-file self-target check, factored out
 /// of `Mover` so it's unit-testable without spinning up a libnfs pool.
 /// See `Mover::check_self_target` for behavior; this is the body.
+/// `src`, `dst`, and `dst_partial` must be comparable paths — the
+/// callers pass server-absolute paths when `same_server`.
 pub(crate) fn check_self_target(
-    source_url: &str,
-    dest_url: &str,
+    same_server: bool,
     src: &[u8],
     dst: &[u8],
     dst_partial: &[u8],
 ) -> Result<(), MoveError> {
-    if source_url != dest_url {
+    if !same_server {
         return Ok(());
     }
     if src == dst {
@@ -1643,8 +1688,7 @@ mod tests {
 
     #[test]
     fn self_target_check_blocks_same_path() {
-        let url = "nfs://host/exp";
-        let r = check_self_target(url, url, b"/foo/bar", b"/foo/bar", b"/foo/.bar.h.1.partial");
+        let r = check_self_target(true, b"/foo/bar", b"/foo/bar", b"/foo/.bar.h.1.partial");
         let e = r.expect_err("identical src and dst must fail SELF_TARGET");
         assert_eq!(e.error, "SELF_TARGET");
         assert_eq!(e.phase, FailurePhase::Open);
@@ -1654,35 +1698,47 @@ mod tests {
     fn self_target_check_blocks_same_parent_dir() {
         // dst path differs but its .partial parent equals src parent —
         // create-with-O_TRUNC would still trash the source file.
-        let url = "nfs://host/exp";
-        let r = check_self_target(url, url, b"/foo/bar", b"/foo/baz", b"/foo/.bar.h.1.partial");
+        let r = check_self_target(true, b"/foo/bar", b"/foo/baz", b"/foo/.bar.h.1.partial");
         assert_eq!(r.unwrap_err().error, "SELF_TARGET");
     }
 
     #[test]
-    fn self_target_check_allows_different_url() {
+    fn self_target_check_allows_different_servers() {
         // Different servers — paths can collide all they want.
-        let r = check_self_target(
-            "nfs://srcA/exp",
-            "nfs://srcB/exp",
-            b"/foo/bar",
-            b"/foo/bar",
-            b"/foo/.bar.h.1.partial",
-        );
+        let r = check_self_target(false, b"/foo/bar", b"/foo/bar", b"/foo/.bar.h.1.partial");
         assert!(r.is_ok());
     }
 
     #[test]
     fn self_target_check_allows_disjoint_dirs() {
-        let url = "nfs://host/exp";
-        let r = check_self_target(
-            url,
-            url,
-            b"/src/file",
-            b"/dst/file",
-            b"/dst/.file.h.1.partial",
-        );
+        let r = check_self_target(true, b"/src/file", b"/dst/file", b"/dst/.file.h.1.partial");
         assert!(r.is_ok());
+    }
+
+    #[test]
+    fn export_prefix_and_absolute_paths_make_two_mounts_comparable() {
+        assert_eq!(export_prefix("nfs://h/export"), b"/export");
+        assert_eq!(export_prefix("nfs://h/export/"), b"/export");
+        assert_eq!(
+            export_prefix("nfs://h/export/data?version=3"),
+            b"/export/data"
+        );
+        assert_eq!(export_prefix("nfs://h/"), b"");
+        assert_eq!(export_prefix("garbage"), b"");
+        // nfs://h/export + /backup/x vs nfs://h/export/backup + /x:
+        // the same server file, spelled through two mounts.
+        let a = abs_server_path(&export_prefix("nfs://h/export"), b"/backup/x");
+        let b = abs_server_path(&export_prefix("nfs://h/export/backup"), b"/x");
+        assert_eq!(a, b);
+        assert_eq!(a, b"/export/backup/x");
+        let e = check_self_target(
+            true,
+            &a,
+            &b,
+            &abs_server_path(b"/export/backup", b"/.x.h.1.partial"),
+        )
+        .unwrap_err();
+        assert_eq!(e.error, "SELF_TARGET");
     }
 
     // ---- stream_copy_inner: short-read behavior ------------------
@@ -1818,6 +1874,7 @@ mod tests {
             use_raw_fh: false,
             direct_commit: false,
             rpc_timeout_ms: crate::libnfs::DEFAULT_RPC_TIMEOUT_MS,
+            same_server: false,
         };
         Mover::new(
             cfg,

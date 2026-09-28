@@ -90,8 +90,9 @@ pruned; delete them by hand once their reports are no longer needed.
   atomic `.partial` to final-name RENAME. A crash can never leave a
   torn file visible under its final name.
 - Source/destination overlap is refused at `copy` (same server, same
-  path or nested either way) and re-checked at every copy from the
-  recorded manifest.
+  path or nested either way) and re-proved on every `copy` and `sync`
+  from the recorded manifest, in three layers; see
+  [Endpoint separation](#endpoint-separation).
 - Owner, mode, and times are preserved. A source attribute the
   destination will not accept (for example chown without root on the
   destination) is recorded as a downgrade, not a failure.
@@ -99,6 +100,58 @@ pruned; delete them by hand once their reports are no longer needed.
   first row is fully published before the rest link to it.
 - Failures and downgrades are separate JSONL streams, written after
   every shard.
+
+## Endpoint separation
+
+A destination that is the source, or inside it, truncates source
+files (the mover creates with `O_TRUNC`). Two URL strings that differ
+are never taken as proof of two servers. Separation is established in
+three layers, each on every run:
+
+1. **Canonical spelling.** Host names are lowercased and stripped of
+   a trailing dot; IP literals take one text form (an IPv4-mapped
+   IPv6 literal is its IPv4 address); the default port 2049 is the
+   absent port; libnfs `?options` are sorted and never part of
+   identity. Two URLs with one canonical host are one server, whatever
+   their port or options say, and their paths must be disjoint (not
+   equal, neither a prefix of the other).
+2. **Name resolution.** Two different names are resolved; if their
+   address sets intersect they are one server and the same path rule
+   applies. A name that does not resolve is an error, never
+   "different".
+3. **Mounted identity** (`copy`, the `sync` delta copy, and the
+   cutover read-back — everything that mounts). For each mounted root
+   mongoose records the connected peer address, the root filehandle
+   from MNT, the root's `(fsid, fileid)`, and its ancestor chain
+   (LOOKUP `..` until the server returns the same object, an error,
+   or 4096 steps). The two roots are compared for equality and for
+   one being an ancestor of the other: by filehandle bytes on any
+   server, and by `(fsid, fileid)` once the servers are known to be
+   one (same name, shared address, or same peer). A filehandle match
+   between apparently different servers is settled by a probe: an
+   empty directory is created under the destination root and looked
+   up on the *source* connection through the destination's own
+   filehandle, then removed. Visible means one server (refuse);
+   ENOENT means two servers that happen to hand out equal bytes
+   (cloned images do); anything else means separation cannot be
+   proved, and the job is refused. On one server the copy also
+   searches the source index for a directory whose fileid is the
+   destination root's and confirms it by LOOKUP, which catches a
+   destination export that is a bind mount or second export of a
+   directory inside the source tree even when `..` cannot leave the
+   export.
+
+The per-file self-target check in the mover stays armed whenever the
+two servers may be one, and compares server-absolute paths (export +
+path), so two mounts of one server compare correctly. There is no
+flag that disables any of this; the recorded evidence is printed as
+`endpoints:` at the start of every copy and verification.
+
+Not covered: a *source* export that is a differently named alias of a
+directory inside the destination tree. The copy then writes beside
+the source rather than over it, and the per-file check still refuses
+any path collision it can see. Sibling paths on one server, and two
+distinct exports on one server, are allowed once proved disjoint.
 
 ## Cutover verification
 

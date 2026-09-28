@@ -15,6 +15,8 @@
 //! idempotent: `.partial` + rename).
 
 use crate::cli::Tuning;
+use crate::endpoint;
+use crate::identity;
 use crate::manifest::{self, LocalManifest};
 use crate::progress::{write_shard_jsonl, CopyProgress};
 use crate::util::raise_fd_limit;
@@ -72,6 +74,7 @@ pub fn mover_params(
     tuning: &Tuning,
     require_chown: bool,
     host_id: String,
+    same_server: bool,
 ) -> MoverParams {
     MoverParams {
         source_url: m.source.url.clone(),
@@ -90,6 +93,7 @@ pub fn mover_params(
         require_unchanged_size: false,
         inflight: inflight_for(tuning),
         host_id,
+        same_server,
     }
 }
 
@@ -113,9 +117,15 @@ pub async fn run_manifest(
         )
     })?;
 
-    // The manifest was overlap-checked at prepare time; check again in
-    // case it was hand-edited.
-    migration_core::overlap::check(&m.source, &m.dest)?;
+    // Endpoint separation, re-proved on every run from the recorded
+    // manifest (which may have been hand-edited): layers 1 and 2 —
+    // canonical spelling and name resolution — before anything is
+    // mounted; layer 3, the servers' own view, once the pool is up
+    // and before the first destination write.
+    let src_url = endpoint::parse("manifest source.url", &m.source.url)?;
+    let dst_url = endpoint::parse("manifest dest.url", &m.dest.url)?;
+    endpoint::check_overlap(&src_url, &dst_url)?;
+    let names = endpoint::check_overlap_resolved(&src_url, &dst_url)?;
 
     // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } != 0 {
@@ -147,8 +157,17 @@ pub async fn run_manifest(
     let fence = Fence::new();
     let downgrades = DowngradeSink::new();
     let failures = FailureSink::new();
-    let params = mover_params(&m, tuning, cap_chown, host_id);
+    let params = mover_params(&m, tuning, cap_chown, host_id, names.may_be_same_server());
     let built = mover_factory::build(&params, downgrades.clone(), fence.clone()).await?;
+    let separation = identity::prove_separation(
+        &built.pool,
+        &src_url,
+        &dst_url,
+        &names,
+        &full_index_shards(&wd, &m),
+    )
+    .await?;
+    println!("  endpoints: {}\n", separation.evidence);
     let throughput = ThroughputCounter::new();
     let inflight = InflightLimiter::new(&params.inflight);
     let live = Arc::new(LivePending::default());
@@ -318,6 +337,16 @@ pub async fn run_manifest(
     Ok(summary)
 }
 
+/// Every shard of this work dir's full index (`manifest.json`), for
+/// the identity check's search of the source tree. A delta manifest
+/// is a subset; the full index sits beside it. Falls back to the
+/// manifest being copied.
+fn full_index_shards(wd: &WorkDir, m: &LocalManifest) -> Vec<std::path::PathBuf> {
+    let full = manifest::load(wd).ok().flatten();
+    let shards = full.as_ref().map(|f| &f.shards).unwrap_or(&m.shards);
+    shards.iter().map(|s| wd.shard_path(&s.path)).collect()
+}
+
 fn hostname() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname")
         .map(|s| s.trim().to_string())
@@ -420,7 +449,11 @@ mod tests {
 
     #[test]
     fn mover_params_project_manifest_and_tuning() {
-        let p = mover_params(&local_manifest(), &tuning(), true, "h".into());
+        let p = mover_params(&local_manifest(), &tuning(), true, "h".into(), true);
+        assert!(
+            p.same_server,
+            "the identity verdict arms the per-file check"
+        );
         assert_eq!(p.source_url, "nfs://s/e");
         assert_eq!(p.dest_url, "nfs://d/e");
         assert_eq!(p.source_root, "/data");
@@ -483,5 +516,54 @@ mod tests {
         crate::util::write_json_atomic(&wd.manifest_json(), &m).unwrap();
         let err = run(dir.path(), &tuning()).await.unwrap_err();
         assert!(format!("{err:#}").contains("overlap"), "{err:#}");
+    }
+
+    /// A hand-edited manifest whose two URLs spell one server two
+    /// ways is refused by the same layers as the CLI flags, before
+    /// any pool mounts (these hosts do not exist; a mount would fail
+    /// with a different error).
+    #[tokio::test]
+    async fn copy_rejects_aliased_manifest_endpoints_before_mounting() {
+        for (src, dst, how) in [
+            (
+                "nfs://H.Example.com/export",
+                "nfs://h.example.com./export/backup",
+                "same host name",
+            ),
+            (
+                "nfs://h.example.com:2049/export",
+                "nfs://h.example.com/export?version=3",
+                "same host name",
+            ),
+            (
+                "nfs://localhost/export",
+                "nfs://127.0.0.1/export/sub",
+                "both names resolve to",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let wd = WorkDir::new(dir.path());
+            let mut m = local_manifest();
+            m.source.url = src.into();
+            m.dest.url = dst.into();
+            m.source.root = "/".into();
+            m.dest.root = "/".into();
+            crate::util::write_json_atomic(&wd.manifest_json(), &m).unwrap();
+            let err = run(dir.path(), &tuning()).await.unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains("overlap"), "{src} vs {dst}: {msg}");
+            assert!(msg.contains(how), "{src} vs {dst}: {msg}");
+        }
+    }
+
+    #[tokio::test]
+    async fn copy_rejects_a_malformed_manifest_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let wd = WorkDir::new(dir.path());
+        let mut m = local_manifest();
+        m.dest.url = "new-server:/export".into();
+        crate::util::write_json_atomic(&wd.manifest_json(), &m).unwrap();
+        let err = run(dir.path(), &tuning()).await.unwrap_err();
+        assert!(format!("{err:#}").contains("manifest dest.url"), "{err:#}");
     }
 }

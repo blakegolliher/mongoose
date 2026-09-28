@@ -231,6 +231,31 @@ extern "C" {
     pub fn nfs_fsync(nfs: *mut nfs_context, nfsfh: *mut nfsfh) -> c_int;
 }
 
+// =============================================================================
+// Endpoint-identity additions (mongoose PR-04). All three verified
+// 2026-09-28 against the pinned source tree (~/projects/libnfs @
+// 6073b694: lib/libnfs.c `nfs_get_fd` / `nfs_get_export`,
+// include/nfsc/libnfs.h:125 `nfs_get_fd`, :1177 `nfs_rmdir`) and
+// exported by both packaging/libnfs-stage/libnfs.a and
+// /usr/local/lib/libnfs.so.16.0.2:
+//
+//   nm packaging/libnfs-stage/libnfs.a | grep -wE "T (nfs_get_fd|nfs_get_export|nfs_rmdir)"
+//   nm -D /usr/local/lib/libnfs.so.16.0.2 | grep -wE "nfs_get_fd|nfs_get_export|nfs_rmdir"
+// =============================================================================
+
+extern "C" {
+    /// The socket libnfs is currently using for this context (the NFS
+    /// connection once mounted). `getpeername` on it is the ground
+    /// truth for which server address we are talking to.
+    pub fn nfs_get_fd(nfs: *mut nfs_context) -> c_int;
+    /// The export string handed to MNT — for this libnfs the URL path
+    /// verbatim (`nfs3_mount_async` stores it; there is no
+    /// export-list fallback), so it names the mounted root directory
+    /// as the server knows it.
+    pub fn nfs_get_export(nfs: *mut nfs_context) -> *const c_char;
+    pub fn nfs_rmdir(nfs: *mut nfs_context, path: *const c_char) -> c_int;
+}
+
 /// F12 default per-RPC timeout, in milliseconds. Matches the pinned
 /// libnfs's implicit default (`lib/init.c`), now explicit at every
 /// context-creation point and configurable via
@@ -366,6 +391,69 @@ impl NfsContext {
     pub fn raw(&mut self) -> *mut nfs_context {
         self.raw
     }
+
+    /// The server address this context's socket is connected to, or
+    /// `None` when there is no live socket. This is what the kernel
+    /// says, not what DNS said: two names for one server show up here
+    /// as one address (unless the server is multi-homed).
+    pub fn peer_addr(&mut self) -> Option<std::net::SocketAddr> {
+        let fd = unsafe { nfs_get_fd(self.raw) };
+        if fd < 0 {
+            return None;
+        }
+        let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        // SAFETY: fd is a socket libnfs owns; storage/len are valid
+        // out-pointers sized for any address family.
+        let rc = unsafe {
+            libc::getpeername(
+                fd,
+                &mut storage as *mut libc::sockaddr_storage as *mut libc::sockaddr,
+                &mut len,
+            )
+        };
+        if rc != 0 {
+            return None;
+        }
+        sockaddr_to_std(&storage)
+    }
+
+    /// The export path this context mounted (the URL path, verbatim).
+    pub fn export_path(&mut self) -> String {
+        let p = unsafe { nfs_get_export(self.raw) };
+        if p.is_null() {
+            return String::new();
+        }
+        unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+    }
+}
+
+/// Decode a `sockaddr_storage` filled by `getpeername`.
+pub fn sockaddr_to_std(s: &libc::sockaddr_storage) -> Option<std::net::SocketAddr> {
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+    match s.ss_family as c_int {
+        libc::AF_INET => {
+            // SAFETY: family says the storage holds a sockaddr_in.
+            let a: &libc::sockaddr_in =
+                unsafe { &*(s as *const libc::sockaddr_storage as *const libc::sockaddr_in) };
+            Some(SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::from(u32::from_be(a.sin_addr.s_addr)),
+                u16::from_be(a.sin_port),
+            )))
+        }
+        libc::AF_INET6 => {
+            // SAFETY: family says the storage holds a sockaddr_in6.
+            let a: &libc::sockaddr_in6 =
+                unsafe { &*(s as *const libc::sockaddr_storage as *const libc::sockaddr_in6) };
+            Some(SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::from(a.sin6_addr.s6_addr),
+                u16::from_be(a.sin6_port),
+                a.sin6_flowinfo,
+                a.sin6_scope_id,
+            )))
+        }
+        _ => None,
+    }
 }
 
 impl Drop for NfsContext {
@@ -497,6 +585,38 @@ mod tests {
             effective_rpc_timeout(u32::MAX),
             Some(std::os::raw::c_int::MAX)
         );
+    }
+
+    #[test]
+    fn sockaddr_decoding_covers_v4_and_v6() {
+        let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        {
+            let a = unsafe {
+                &mut *(&mut storage as *mut libc::sockaddr_storage as *mut libc::sockaddr_in)
+            };
+            a.sin_family = libc::AF_INET as libc::sa_family_t;
+            a.sin_port = 2049u16.to_be();
+            a.sin_addr.s_addr = u32::from(std::net::Ipv4Addr::new(10, 1, 2, 3)).to_be();
+        }
+        assert_eq!(
+            sockaddr_to_std(&storage).unwrap().to_string(),
+            "10.1.2.3:2049"
+        );
+        let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        {
+            let a = unsafe {
+                &mut *(&mut storage as *mut libc::sockaddr_storage as *mut libc::sockaddr_in6)
+            };
+            a.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+            a.sin6_port = 2049u16.to_be();
+            a.sin6_addr.s6_addr = "fd00::1".parse::<std::net::Ipv6Addr>().unwrap().octets();
+        }
+        assert_eq!(
+            sockaddr_to_std(&storage).unwrap().to_string(),
+            "[fd00::1]:2049"
+        );
+        let storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        assert!(sockaddr_to_std(&storage).is_none(), "AF_UNSPEC");
     }
 
     #[test]

@@ -40,10 +40,15 @@ an explicit design change.
   do not write your own.
 
 - **Source and dest paths must be provably distinct before any
-  write.** A startup check (`migration_core::overlap::check`)
-  verifies endpoints don't overlap; a per-file check inside the
-  mover verifies the specific paths don't collide. Both checks must
-  exist; either alone is insufficient.
+  write.** A startup check (`migration_core::overlap::check` in the
+  worker; `mongoose::endpoint` + `mongoose::identity` in mongoose,
+  which also canonicalize spellings, resolve names, and compare the
+  mounted roots' filehandles, `(fsid, fileid)`, and ancestry) verifies
+  endpoints don't overlap; a per-file check inside the mover verifies
+  the specific paths don't collide. Both checks must exist; either
+  alone is insufficient. `MoverConfig::same_server` arms the per-file
+  check and must never be set to false to silence it: string
+  inequality of two URLs is not proof of two servers.
 
 - **`.partial` is in the same directory as the final destination.**
   This is a correctness requirement for atomic rename, but combined
