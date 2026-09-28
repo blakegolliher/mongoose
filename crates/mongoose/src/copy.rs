@@ -18,7 +18,7 @@ use crate::cli::Tuning;
 use crate::endpoint;
 use crate::identity;
 use crate::manifest::{self, LocalManifest};
-use crate::progress::{write_shard_jsonl, CopyProgress};
+use crate::progress::{persist_shard_results_then, write_shard_jsonl, CopyProgress};
 use crate::util::raise_fd_limit;
 use crate::workdir::WorkDir;
 use anyhow::{Context, Result};
@@ -244,16 +244,32 @@ pub async fn run_manifest(
         // Drain this shard's failure/downgrade records to local JSONL
         // before the shard is marked complete, so an interruption
         // between the two never loses records.
-        if let Some(p) =
-            write_shard_jsonl(&wd.failures_dir(), shard.stem(), &failures.drain_jsonl())?
-        {
-            println!("  failures  -> {}", p.display());
-        }
-        if let Some(p) = write_shard_jsonl(
+        let failures_jsonl = failures.drain_jsonl();
+        let downgrades_jsonl = downgrades.drain_jsonl();
+        let (failure_path, downgrade_path, ()) = persist_shard_results_then(
+            &wd.failures_dir(),
             &wd.downgrades_dir(),
             shard.stem(),
-            &downgrades.drain_jsonl(),
-        )? {
+            &failures_jsonl,
+            &downgrades_jsonl,
+            write_shard_jsonl,
+            || {
+                if !outcome.interrupted {
+                    progress.files_ok += outcome.files_ok;
+                    progress.files_failed += outcome.files_failed;
+                    progress.files_torn += outcome.files_torn;
+                    progress.bytes_moved += outcome.bytes_moved;
+                    progress.throughput_mb_s_1m = throughput.sample_mb_s(60);
+                    progress.completed_shards.push(shard.path.clone());
+                    progress.write(&wd)?;
+                }
+                Ok(())
+            },
+        )?;
+        if let Some(p) = failure_path {
+            println!("  failures  -> {}", p.display());
+        }
+        if let Some(p) = downgrade_path {
             println!("  downgrades -> {}", p.display());
         }
 
@@ -279,14 +295,7 @@ pub async fn run_manifest(
             break;
         }
 
-        progress.files_ok += outcome.files_ok;
-        progress.files_failed += outcome.files_failed;
-        progress.files_torn += outcome.files_torn;
-        progress.bytes_moved += outcome.bytes_moved;
-        progress.throughput_mb_s_1m = throughput.sample_mb_s(60);
-        progress.completed_shards.push(shard.path.clone());
         summary.shards_done += 1;
-        progress.write(&wd)?;
         println!(
             "  done: {} ok, {} failed, {} bytes",
             outcome.files_ok, outcome.files_failed, outcome.bytes_moved

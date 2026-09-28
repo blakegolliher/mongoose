@@ -76,18 +76,57 @@ impl CopyProgress {
 /// the same shard, so results always reflect the last completed pass.
 /// Returns the path written, or `None` when there was nothing.
 pub fn write_shard_jsonl(dir: &Path, stem: &str, body: &[u8]) -> Result<Option<PathBuf>> {
+    write_shard_jsonl_with(dir, stem, body, |_| Ok(()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResultFileStep {
+    Remove,
+    ParentSync,
+}
+
+fn write_shard_jsonl_with(
+    dir: &Path,
+    stem: &str,
+    body: &[u8],
+    mut before: impl FnMut(ResultFileStep) -> std::io::Result<()>,
+) -> Result<Option<PathBuf>> {
     let path = dir.join(format!("{stem}.jsonl"));
     if body.is_empty() {
+        before(ResultFileStep::Remove)?;
         match std::fs::remove_file(&path) {
-            Ok(()) => {}
+            Ok(()) => {
+                before(ResultFileStep::ParentSync)?;
+                std::fs::File::open(dir)
+                    .with_context(|| format!("opening result directory {}", dir.display()))?
+                    .sync_all()
+                    .with_context(|| format!("syncing result directory {}", dir.display()))?;
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e).with_context(|| format!("removing stale {}", path.display())),
         }
         return Ok(None);
     }
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
+    crate::util::write_bytes_atomic(&path, body)?;
     Ok(Some(path))
+}
+
+/// Persist both result streams before invoking the closure that commits
+/// shard completion to progress. A persistence error never runs `commit`.
+pub fn persist_shard_results_then<T>(
+    failures_dir: &Path,
+    downgrades_dir: &Path,
+    stem: &str,
+    failures: &[u8],
+    downgrades: &[u8],
+    mut write: impl FnMut(&Path, &str, &[u8]) -> Result<Option<PathBuf>>,
+    commit: impl FnOnce() -> Result<T>,
+) -> Result<(Option<PathBuf>, Option<PathBuf>, T)> {
+    let failure_path = write(failures_dir, stem, failures)?;
+    let downgrade_path = write(downgrades_dir, stem, downgrades)?;
+    let committed = commit()?;
+    Ok((failure_path, downgrade_path, committed))
 }
 
 #[cfg(test)]
@@ -138,5 +177,136 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn stale_result_removal_and_parent_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink_dir = dir.path().join("failures");
+        let path = sink_dir.join("part-0000.jsonl");
+        std::fs::create_dir_all(&sink_dir).unwrap();
+        std::fs::write(&path, b"old\n").unwrap();
+        write_shard_jsonl(&sink_dir, "part-0000", b"").unwrap();
+        assert!(!path.exists());
+        assert_eq!(std::fs::read_dir(&sink_dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn stale_result_removal_error_keeps_old_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink_dir = dir.path().join("failures");
+        let path = sink_dir.join("part-0000.jsonl");
+        std::fs::create_dir_all(&sink_dir).unwrap();
+        std::fs::write(&path, b"old\n").unwrap();
+        let result = write_shard_jsonl_with(&sink_dir, "part-0000", b"", |_| {
+            Err(std::io::Error::other("injected removal failure"))
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"old\n");
+    }
+
+    #[test]
+    fn stale_result_sync_failure_does_not_commit_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let wd = WorkDir::new(dir.path());
+        std::fs::create_dir_all(wd.failures_dir()).unwrap();
+        let result_path = wd.failures_dir().join("part-0000.jsonl");
+        std::fs::write(&result_path, b"old\n").unwrap();
+        let mut progress = CopyProgress::fresh("run-a", 1);
+        progress.write(&wd).unwrap();
+        let result = persist_shard_results_then(
+            &wd.failures_dir(),
+            &wd.downgrades_dir(),
+            "part-0000",
+            b"",
+            b"",
+            |target_dir, stem, body| {
+                if target_dir == wd.failures_dir() {
+                    write_shard_jsonl_with(target_dir, stem, body, |step| {
+                        if step == ResultFileStep::ParentSync {
+                            Err(std::io::Error::other("injected directory sync failure"))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                } else {
+                    write_shard_jsonl(target_dir, stem, body)
+                }
+            },
+            || {
+                progress
+                    .completed_shards
+                    .push("canonical/part-0000.parquet".into());
+                progress.write(&wd)
+            },
+        );
+        assert!(result.is_err());
+        assert!(!progress.is_completed("canonical/part-0000.parquet"));
+        let saved = CopyProgress::load_or_fresh(&wd, "run-a", 1).unwrap();
+        assert!(!saved.is_completed("canonical/part-0000.parquet"));
+    }
+
+    #[test]
+    fn durable_results_are_in_place_before_progress_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let wd = WorkDir::new(dir.path());
+        std::fs::create_dir_all(wd.downgrades_dir()).unwrap();
+        let stale_downgrade = wd.downgrades_dir().join("part-0000.jsonl");
+        std::fs::write(&stale_downgrade, b"stale\n").unwrap();
+        let mut progress = CopyProgress::fresh("run-a", 1);
+        let result = persist_shard_results_then(
+            &wd.failures_dir(),
+            &wd.downgrades_dir(),
+            "part-0000",
+            b"failure\n",
+            b"",
+            write_shard_jsonl,
+            || {
+                assert_eq!(
+                    std::fs::read(wd.failures_dir().join("part-0000.jsonl")).unwrap(),
+                    b"failure\n"
+                );
+                assert!(!stale_downgrade.exists());
+                progress
+                    .completed_shards
+                    .push("canonical/part-0000.parquet".into());
+                progress.write(&wd)
+            },
+        )
+        .unwrap();
+        assert_eq!(result.1, None);
+        let saved = CopyProgress::load_or_fresh(&wd, "run-a", 1).unwrap();
+        assert!(saved.is_completed("canonical/part-0000.parquet"));
+    }
+
+    #[test]
+    fn result_persistence_failure_does_not_commit_shard_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let wd = WorkDir::new(dir.path());
+        let mut progress = CopyProgress::fresh("run-a", 1);
+        progress.write(&wd).unwrap();
+        let result = persist_shard_results_then(
+            &wd.failures_dir(),
+            &wd.downgrades_dir(),
+            "part-0000",
+            b"failure\n",
+            b"downgrade\n",
+            |target_dir, stem, body| {
+                if target_dir == wd.downgrades_dir() {
+                    anyhow::bail!("injected rename/sync failure")
+                }
+                write_shard_jsonl(target_dir, stem, body)
+            },
+            || {
+                progress
+                    .completed_shards
+                    .push("canonical/part-0000.parquet".into());
+                progress.write(&wd)
+            },
+        );
+        assert!(result.is_err());
+        assert!(!progress.is_completed("canonical/part-0000.parquet"));
+        let saved = CopyProgress::load_or_fresh(&wd, "run-a", 1).unwrap();
+        assert!(!saved.is_completed("canonical/part-0000.parquet"));
     }
 }

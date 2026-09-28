@@ -6,29 +6,118 @@ use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::fs::File;
 use std::io::Write;
-use std::path::Path;
+use std::io::{ErrorKind, Result as IoResult};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Write `value` as pretty JSON through a `.partial` sibling and an
-/// atomic rename, fsyncing file and directory, so an interrupted write
-/// never leaves a torn checkpoint behind.
-pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AtomicWriteStep {
+    Create,
+    Write,
+    Flush,
+    FileSync,
+    Rename,
+    ParentSync,
+}
+
+fn temporary_sibling(path: &Path, id: u64) -> Result<PathBuf> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("{} has no file name", path.display()))?
+        .to_string_lossy();
+    Ok(path.with_file_name(format!(".{name}.{}.{}.partial", std::process::id(), id)))
+}
+
+fn create_unique_temp_file(
+    path: &Path,
+    first_id: u64,
+    mut before: impl FnMut(AtomicWriteStep) -> IoResult<()>,
+) -> Result<(PathBuf, File)> {
+    const MAX_TEMP_CANDIDATES: u64 = 128;
+    before(AtomicWriteStep::Create)?;
+    for offset in 0..MAX_TEMP_CANDIDATES {
+        let id = first_id.wrapping_add(offset);
+        let temporary = temporary_sibling(path, id)?;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => return Ok((temporary, file)),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("creating {}", temporary.display()))
+            }
+        }
+    }
+    anyhow::bail!(
+        "could not create a unique temporary sibling for {} after {MAX_TEMP_CANDIDATES} candidates",
+        path.display()
+    )
+}
+
+fn write_bytes_atomic_with(
+    path: &Path,
+    bytes: &[u8],
+    mut before: impl FnMut(AtomicWriteStep) -> std::io::Result<()>,
+) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", path.display()))?;
     std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    let partial = path.with_extension("json.partial");
-    {
-        let mut file = std::fs::File::create(&partial)
-            .with_context(|| format!("creating {}", partial.display()))?;
-        file.write_all(&serde_json::to_vec_pretty(value)?)?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
+    let first_id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    let mut temporary = None;
+    let mut created = false;
+    let write_result = (|| -> Result<()> {
+        let (temporary_path, mut file) = create_unique_temp_file(path, first_id, &mut before)?;
+        temporary = Some(temporary_path);
+        created = true;
+        let temporary = temporary.as_ref().expect("temp path assigned above");
+        before(AtomicWriteStep::Write)?;
+        file.write_all(bytes)
+            .with_context(|| format!("writing {}", temporary.display()))?;
+        before(AtomicWriteStep::Flush)?;
+        file.flush()
+            .with_context(|| format!("flushing {}", temporary.display()))?;
+        before(AtomicWriteStep::FileSync)?;
+        file.sync_all()
+            .with_context(|| format!("syncing {}", temporary.display()))?;
+        drop(file);
+        before(AtomicWriteStep::Rename)?;
+        std::fs::rename(temporary, path)
+            .with_context(|| format!("renaming {} -> {}", temporary.display(), path.display()))?;
+        before(AtomicWriteStep::ParentSync)?;
+        std::fs::File::open(parent)
+            .with_context(|| format!("opening parent {}", parent.display()))?
+            .sync_all()
+            .with_context(|| format!("syncing parent {}", parent.display()))?;
+        Ok(())
+    })();
+    if write_result.is_err() && created {
+        if let Some(temporary) = temporary {
+            let _ = std::fs::remove_file(temporary);
+        }
     }
-    std::fs::rename(&partial, path)
-        .with_context(|| format!("renaming {} -> {}", partial.display(), path.display()))?;
-    std::fs::File::open(parent)?.sync_all()?;
-    Ok(())
+    write_result
+}
+
+/// Write bytes through a unique same-directory temporary file, then
+/// flush, fsync, rename, and fsync the containing directory.
+pub fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_bytes_atomic_with(path, bytes, |_| Ok(()))
+}
+
+/// Write `value` as pretty JSON through a unique `.partial` sibling and
+/// an atomic rename, fsyncing file and directory so interrupted writes
+/// never leave a torn checkpoint behind.
+pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    write_bytes_atomic(path, &bytes)
 }
 
 /// `Ok(None)` when the file does not exist; parse failures are errors
@@ -106,10 +195,95 @@ mod tests {
         write_json_atomic(&path, &serde_json::json!({"a": 1})).unwrap();
         let back: serde_json::Value = read_json_opt(&path).unwrap().unwrap();
         assert_eq!(back["a"], 1);
-        assert!(!path.with_extension("json.partial").exists());
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
         let absent: Option<serde_json::Value> =
             read_json_opt(&dir.path().join("missing.json")).unwrap();
         assert!(absent.is_none());
+    }
+
+    #[test]
+    fn atomic_bytes_replace_existing_file_and_use_unique_temps() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("results.jsonl");
+        write_bytes_atomic(&path, b"old\n").unwrap();
+        write_bytes_atomic(&path, b"new\n").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new\n");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn atomic_bytes_follow_durable_publication_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("record.jsonl");
+        let mut steps = Vec::new();
+        write_bytes_atomic_with(&path, b"record\n", |step| {
+            steps.push(step);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            steps,
+            [
+                AtomicWriteStep::Create,
+                AtomicWriteStep::Write,
+                AtomicWriteStep::Flush,
+                AtomicWriteStep::FileSync,
+                AtomicWriteStep::Rename,
+                AtomicWriteStep::ParentSync,
+            ]
+        );
+    }
+
+    #[test]
+    fn stale_temp_candidate_is_skipped_without_modifying_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("results.jsonl");
+        let first_id = 42_424;
+        let stale = temporary_sibling(&path, first_id).unwrap();
+        std::fs::write(&stale, b"stale crash artifact").unwrap();
+
+        let (created_path, mut file) =
+            create_unique_temp_file(&path, first_id, |_| Ok(())).unwrap();
+        assert_ne!(created_path, stale);
+        assert_eq!(std::fs::read(&stale).unwrap(), b"stale crash artifact");
+        file.write_all(b"fresh result").unwrap();
+        drop(file);
+        assert_eq!(std::fs::read(&created_path).unwrap(), b"fresh result");
+        std::fs::remove_file(created_path).unwrap();
+    }
+
+    #[test]
+    fn injected_atomic_write_failures_preserve_old_target_and_remove_temp() {
+        for failed_step in [
+            AtomicWriteStep::Create,
+            AtomicWriteStep::Write,
+            AtomicWriteStep::Flush,
+            AtomicWriteStep::FileSync,
+            AtomicWriteStep::Rename,
+            AtomicWriteStep::ParentSync,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("record.jsonl");
+            std::fs::write(&path, b"old\n").unwrap();
+            let err = write_bytes_atomic_with(&path, b"new\n", |step| {
+                if step == failed_step {
+                    Err(std::io::Error::other("injected failure"))
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(err.is_err(), "{failed_step:?} should fail");
+            if failed_step == AtomicWriteStep::ParentSync {
+                // Rename happened before the directory sync failed.
+                assert_eq!(std::fs::read(&path).unwrap(), b"new\n");
+            } else {
+                assert_eq!(std::fs::read(&path).unwrap(), b"old\n");
+            }
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        }
     }
 
     #[test]
