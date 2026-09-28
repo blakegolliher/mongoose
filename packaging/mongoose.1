@@ -74,12 +74,20 @@ Local directory for this job's index, checkpoints, and results. One job
 per directory; reuse it to resume and to sync.
 .TP
 .BI \-\-exclude " GLOB"
-Directory name pattern to skip, e.g.\&
-.IR .snapshot .
+Skip every directory whose name matches
+.IR GLOB ,
+and everything under it: e.g.\&
+.I .snapshot
+or
+.IR '*.tmp' .
+A glob (\fB*\fR, \fB?\fR, \fB[...]\fR, \fB[!...]\fR, \fB\\x\fR for a
+literal) matched against the directory's own name, never its path;
+files are never matched; a pattern containing \fB/\fR is rejected.
 Repeatable;
 .B copy
-only. Remembered in the work dir, so later syncs skip the same
-directories.
+only; an invalid pattern is refused before anything is written.
+Remembered in the work dir, so every later sync and the cutover skip
+the same directories, and they never appear as missing or extra.
 .TP
 .BI \-\-parallel " N"
 How much to do at once: NFS connections, with scan workers and in-flight

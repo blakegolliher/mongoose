@@ -34,6 +34,7 @@ pub async fn run(args: &CopyArgs) -> Result<LocalManifest> {
     // mounted check (layer 3) runs in `copy` before the first write.
     let src = endpoint::parse("--src", &args.src)?;
     let dst = endpoint::parse("--dst", &args.dst)?;
+    crate::exclude::validate("--exclude", &args.exclude)?;
     endpoint::check_overlap(&src, &dst)?;
     let names = endpoint::check_overlap_resolved(&src, &dst)?;
     let source = Endpoint {
@@ -169,6 +170,20 @@ mod tests {
             "{msg}"
         );
         assert!(!dir.path().join("run.json").exists());
+    }
+
+    #[tokio::test]
+    async fn invalid_exclude_is_refused_before_any_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = args("nfs://old/export", "nfs://new/export", dir.path());
+        a.exclude = vec![".snapshot".into(), "a/b".into()];
+        let err = run(&a).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("--exclude") && msg.contains("a/b"), "{msg}");
+        assert!(
+            !dir.path().join("run.json").exists(),
+            "refused before writing anything"
+        );
     }
 
     #[tokio::test]

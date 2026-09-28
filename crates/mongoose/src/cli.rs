@@ -72,8 +72,11 @@ pub struct CopyArgs {
     #[arg(long, value_name = "DIR")]
     pub work_dir: PathBuf,
 
-    /// Directory name pattern to skip, e.g. .snapshot (repeatable).
-    /// Remembered in the work dir, so later syncs skip it too.
+    /// Skip every directory whose name matches this glob, and
+    /// everything under it: `.snapshot`, `.zfs`, `*.tmp`. Matched
+    /// against the name only, never the path. Repeatable. Remembered
+    /// in the work dir, so every later sync and the cutover skip the
+    /// same directories.
     #[arg(long, value_name = "GLOB")]
     pub exclude: Vec<String>,
 

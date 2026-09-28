@@ -106,6 +106,32 @@ pruned; delete them by hand once their reports are no longer needed.
 - Failures and downgrades are separate JSONL streams, written after
   every shard.
 
+## Excludes
+
+`--exclude GLOB` names directories to leave out of the job. The
+contract:
+
+- A pattern is a glob matched against a directory's **own name**:
+  `*` any run of characters, `?` one character, `[...]` a class
+  (`[!...]` negated), `\x` a literal `x`. `.snapshot` matches a
+  directory called exactly `.snapshot`, not `mysnapshots`; `*.tmp`
+  matches `build.tmp`. It is never matched against a path (a pattern
+  containing `/` is refused) and never against a file.
+- A matching directory is dropped where its parent is listed: its own
+  row is not emitted and it is not descended into, so the whole
+  subtree is absent from the index.
+- The set is job identity, recorded in `run.json` at `copy` and fixed
+  for the life of the job. Every scan applies it unchanged: the
+  initial copy, every sync, and the cutover's destination scan, so an
+  excluded tree is absent from both indexes and never shows up as
+  new, deleted, missing, or extra.
+- An invalid pattern is refused before anything is mounted or
+  written, by the same compiler the walker uses to apply it.
+
+The walker's own `--exclude` flag is a regular expression over the
+full path and is not what mongoose passes; mongoose uses the walker's
+`--exclude-dir`, which is the glob above.
+
 ## Scan completeness
 
 An index with a missing subtree is worse than no index: the copy would

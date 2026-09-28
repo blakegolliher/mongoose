@@ -45,6 +45,7 @@ pub mod cli;
 pub mod copy;
 pub mod delta;
 pub mod endpoint;
+pub mod exclude;
 pub mod identity;
 pub mod manifest;
 pub mod prepare;

@@ -153,6 +153,8 @@ pub fn incomplete_message(
 pub struct ScanParams {
     pub scan_url: String,
     pub workers: usize,
+    /// Directory-name globs (`crate::exclude`), the job's `--exclude`
+    /// set; handed to the walker as `--exclude-dir`.
     pub exclude: Vec<String>,
 }
 
@@ -189,13 +191,17 @@ pub async fn ensure_scan(wd: &WorkDir, params: &ScanParams) -> Result<ScanCheckp
         }
     }
 
+    // A bad pattern is refused before a scan attempt exists.
+    crate::exclude::validate("--exclude", &params.exclude)?;
+
     let attempt_dir = wd.next_attempt_dir()?;
     std::fs::create_dir_all(&attempt_dir)?;
     let invocation = tools::WalkerInvocation {
         scan_url: params.scan_url.clone(),
         output: attempt_dir.join("walk.parquet"),
         workers: params.workers,
-        exclude: params.exclude.clone(),
+        exclude: Vec::new(),
+        exclude_dirs: params.exclude.clone(),
         log: attempt_dir.join("walker-progress.jsonl"),
     };
     println!(
@@ -396,7 +402,8 @@ mod tests {
             scan_url: "nfs://h/export/data".into(),
             output: "/w/scan/attempt-0001/walk.parquet".into(),
             workers: 8,
-            exclude: vec![".snapshot".into(), "tmp".into()],
+            exclude: Vec::new(),
+            exclude_dirs: vec![".snapshot".into(), "tmp".into()],
             log: "/w/scan/attempt-0001/walker-progress.jsonl".into(),
         };
         let cli = walker_cli(&invocation).expect("embedded CLI accepts prepare's arguments");
@@ -406,8 +413,45 @@ mod tests {
             cli.output,
             std::path::PathBuf::from("/w/scan/attempt-0001/walk.parquet")
         );
-        assert_eq!(cli.exclude_patterns, vec![".snapshot", "tmp"]);
+        // mongoose's excludes are directory-name globs, never path regexes.
+        assert_eq!(cli.exclude_dirs, vec![".snapshot", "tmp"]);
+        assert!(cli.exclude_patterns.is_empty());
         assert!(cli.quiet, "terminal progress bar suppressed");
+    }
+
+    /// The walker compiles the globs at config time, so a bad one
+    /// fails there; mongoose refuses it earlier still, before an
+    /// attempt directory exists.
+    #[tokio::test]
+    async fn invalid_exclude_glob_fails_before_an_attempt_dir_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let wd = WorkDir::new(dir.path());
+        let err = ensure_scan(
+            &wd,
+            &ScanParams {
+                scan_url: "nfs://h/export".into(),
+                workers: 1,
+                exclude: vec![".snapshot".into(), "[".into()],
+            },
+        )
+        .await
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("--exclude") && msg.contains("\"[\""), "{msg}");
+        assert!(!wd.scan_root().exists(), "no attempt directory was created");
+        assert!(!wd.scan_json().exists());
+
+        // And the walker itself agrees the pattern is invalid.
+        let invocation = tools::WalkerInvocation {
+            scan_url: "nfs://h/export".into(),
+            output: dir.path().join("walk.parquet"),
+            workers: 1,
+            exclude: Vec::new(),
+            exclude_dirs: vec!["[".into()],
+            log: dir.path().join("log.jsonl"),
+        };
+        let cli = walker_cli(&invocation).unwrap();
+        assert!(nfs_walker::WalkConfig::from_args(cli).is_err());
     }
 
     fn stats(completed: bool, errors: u64) -> WalkStats {

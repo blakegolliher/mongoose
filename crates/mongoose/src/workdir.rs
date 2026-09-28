@@ -200,6 +200,15 @@ fn sorted(v: &[String]) -> Vec<&str> {
     out
 }
 
+/// The job's `--exclude` set as recorded at `copy` time: what every
+/// later scan (sync, cutover, destination) must skip too. Empty when
+/// the work dir predates excludes.
+pub fn job_excludes(wd: &WorkDir) -> Result<Vec<String>> {
+    Ok(read_json_opt::<RunSpec>(&wd.run_json())?
+        .map(|s| s.exclude)
+        .unwrap_or_default())
+}
+
 pub fn default_run_id() -> String {
     format!("run-{}", chrono::Utc::now().format("%Y%m%dT%H%M%SZ"))
 }
@@ -317,6 +326,26 @@ mod tests {
         fewer.exclude.pop();
         let err = ensure_run_spec(&path, fewer).unwrap_err();
         assert!(format!("{err:#}").contains("--exclude"), "{err:#}");
+    }
+
+    /// Pass 0 scans with the set the flags gave; every later pass
+    /// reads the same set back from run.json.
+    #[test]
+    fn later_scans_read_back_the_exclude_set_pass_zero_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let wd = WorkDir::new(dir.path());
+        let mut first = spec();
+        first.exclude = vec![".snapshot".into(), "*.tmp".into()];
+        let recorded = ensure_run_spec(&wd.run_json(), first.clone()).unwrap();
+        assert_eq!(recorded.exclude, first.exclude, "what pass 0 scans with");
+        assert_eq!(
+            job_excludes(&wd).unwrap(),
+            first.exclude,
+            "what sync scans with"
+        );
+        assert!(job_excludes(&WorkDir::new(dir.path().join("none")))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

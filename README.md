@@ -75,7 +75,7 @@ destination, or the source, and run `--cutover` again.
 
 | flag | what it does |
 |---|---|
-| `--exclude GLOB` | Skip directories whose name matches, e.g. `--exclude .snapshot`. Repeatable, `copy` only. Remembered in the work dir, so later syncs skip the same things. |
+| `--exclude GLOB` | Skip every directory whose name matches, and everything under it: `--exclude .snapshot`, `--exclude '*.tmp'`. A glob (`*`, `?`, `[...]`) matched against the directory's name only, never its path; files are never matched. Repeatable, `copy` only, checked before anything is written. Remembered in the work dir, so every later sync and the cutover skip the same directories. |
 | `--parallel N` | How much to do at once. Default 32. Drop it (say `--parallel 8`) if the old or new server gets sluggish for other users; raise it (up to 100) if both servers are idle and the copy is slow. Not sticky: stop, re-run with a new value, and the job resumes at that level. |
 | `-v` | More logging (`-vv` for debug). |
 
@@ -112,8 +112,11 @@ destination, or the source, and run `--cutover` again.
   or default port) is still one server, and before the first file is
   written it asks both servers which directory each mount really is
   and refuses if the two are the same or nested. There is no override.
-- **Snapshot directories** (`.snapshot`, `.zfs`, and friends) should be
-  excluded; otherwise every snapshot gets copied as real data.
+- **Snapshot directories** (`.snapshot`, `.zfs`, `~snapshot`, and
+  friends) should be excluded with `--exclude`; otherwise every
+  snapshot gets copied as real data. An excluded directory is left
+  out of every scan, so it is never copied, never reported as changed
+  by a sync, and never reported as missing by the cutover.
 - NFSv3 only.
 
 More detail (what lives in the work dir, resume rules, correctness

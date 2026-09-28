@@ -55,13 +55,20 @@ Important dependencies:
 
 Priority: **P0 / release blocker**
 
-Note (2026-09-28): the walker mongoose now pins (nfs-walker main
-merged into `embed-libnfs-override`, 0.2.0) enforces `--exclude`:
-matched entries are neither emitted nor traversed. The pattern is
-still compiled as a regular expression and matched against the full
-path, so the contract mismatch with mongoose's documented `GLOB` on
-the directory name remains, and the acceptance tests below still
-apply.
+Status (2026-09-28): implemented on branch `pr-01-exclude-globs` plus
+nfs-walker commit 2dded4c on `embed-libnfs-override` (pinned in
+`crates/mongoose/Cargo.toml` and `packaging/nfs-walker.lock.json`).
+Contract chosen: a glob on the directory's own name; the directory
+and its whole subtree are omitted, including its own row. The walker
+gained `--exclude-dir GLOB` (`config::compile_dir_glob`,
+`config::excluded_entry`, applied in both worker loops before a
+directory is queued or emitted); its `--exclude` stays a path regex
+and the help says which is which. mongoose passes only
+`--exclude-dir`, validates every pattern with the walker's compiler
+before writing `run.json` and before creating a scan attempt, keeps
+the set in `run.json`, and reads it back for every sync and cutover
+scan. Contract in `docs/REFERENCE.md` "Excludes". **Hardware gate
+outstanding:** the exclude check against a real export.
 
 Suggested lead: LLM implementer in the walker repository; human review of the
 operator-facing matching contract.

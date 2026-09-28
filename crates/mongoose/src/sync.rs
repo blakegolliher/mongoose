@@ -45,7 +45,7 @@ use crate::progress::CopyProgress;
 use crate::scan::{self, ScanParams};
 use crate::util::{raise_fd_limit, read_json_opt, write_json_atomic};
 use crate::verify::{self, content::LibnfsChecker, VerifyParams, VerifyReport, VerifyStatus};
-use crate::workdir::{RunSpec, WorkDir};
+use crate::workdir::{job_excludes, WorkDir};
 use anyhow::{Context, Result};
 use base64::Engine;
 use migration_core::prepare_tools as tools;
@@ -130,9 +130,7 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
     let names = endpoint::check_overlap_resolved(&src_url, &dst_url)?;
     // The excludes recorded with the job: the rescan must skip exactly
     // what the copy skipped, or every excluded tree classifies NEW.
-    let exclude = read_json_opt::<RunSpec>(&wd.run_json())?
-        .map(|s| s.exclude)
-        .unwrap_or_default();
+    let exclude = job_excludes(&wd)?;
 
     let baseline = load_baseline(&wd)?;
     ensure_baseline_copied(&wd, &baseline)?;
