@@ -55,3 +55,4 @@ pub mod sync;
 pub mod util;
 pub mod verify;
 pub mod workdir;
+pub mod workdir_lock;

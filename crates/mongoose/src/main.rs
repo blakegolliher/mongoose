@@ -48,6 +48,20 @@ async fn async_main() -> ExitCode {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter)),
         )
         .init();
+    let (work_dir, command_name) = match &cli.command {
+        Command::Copy(args) => (&args.work_dir, "mongoose copy"),
+        Command::Sync(args) => (&args.work_dir, "mongoose sync"),
+    };
+    // Keep this guard in scope through dispatch and result reporting. In
+    // particular, copy's prepare and copy stages share this one lock.
+    let _work_dir_lock = match mongoose::workdir_lock::WorkDirLock::acquire(work_dir, command_name)
+    {
+        Ok(lock) => lock,
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            return ExitCode::FAILURE;
+        }
+    };
     let result = match &cli.command {
         Command::Copy(args) => match mongoose::prepare::run(args).await {
             Ok(_) => mongoose::copy::run(&args.work_dir, &args.tuning)
