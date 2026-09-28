@@ -40,7 +40,7 @@ use crate::cli::{SyncArgs, Tuning};
 use crate::copy::{self, CopySummary};
 use crate::endpoint::{self, NameEvidence};
 use crate::identity;
-use crate::manifest::{self, LocalManifest};
+use crate::manifest::{self, ExpectedIdentity, LocalManifest, ManifestKind};
 use crate::progress::CopyProgress;
 use crate::scan::{self, ScanParams};
 use crate::util::{raise_fd_limit, read_json_opt, write_json_atomic};
@@ -132,7 +132,8 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
     // what the copy skipped, or every excluded tree classifies NEW.
     let exclude = job_excludes(&wd)?;
 
-    let baseline = load_baseline(&wd)?;
+    let expected = ExpectedIdentity::from(&root_manifest);
+    let baseline = load_baseline(&wd, &expected)?;
     ensure_baseline_copied(&wd, &baseline)?;
     let pass = baseline.pass + 1;
     let pass_wd = WorkDir::new(wd.pass_dir(pass));
@@ -160,7 +161,12 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
 
     // ---- 2. rewrite the full rescan (the next baseline) -------------
     println!("[2/{steps}] canonical rewrite");
-    let full = match manifest::load(&pass_wd)? {
+    let full = match manifest::load_validated(
+        &pass_wd,
+        &pass_wd.manifest_json(),
+        Some(&expected),
+        ManifestKind::Canonical,
+    )? {
         Some(m) => {
             println!("  pass index already built; not rewriting");
             m
@@ -275,7 +281,12 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
     } else {
         // ---- 4. emit + copy the delta ---------------------------------
         println!("[4/{steps}] delta: {} rows to copy", counts.keep_rows);
-        let delta = match manifest::load_file(&pass_wd.delta_manifest_json())? {
+        let delta = match manifest::load_validated(
+            &pass_wd,
+            &pass_wd.delta_manifest_json(),
+            Some(&expected),
+            ManifestKind::Delta,
+        )? {
             Some(d) => Some(d),
             None => crate::delta::emit(&pass_wd, &full)?,
         };
@@ -397,7 +408,13 @@ async fn cutover_verify(
 
     println!("[4/{steps}] scan the destination");
     let dscan = scan::ensure_scan(&dest_wd, &dest_scan_params(root, exclude, tuning)).await?;
-    let dest_index = match manifest::load(&dest_wd)? {
+    let expected = ExpectedIdentity::from(root);
+    let dest_index = match manifest::load_validated(
+        &dest_wd,
+        &dest_wd.manifest_json(),
+        Some(&expected),
+        ManifestKind::Canonical,
+    )? {
         Some(m) => {
             println!("  destination index already built; not rewriting");
             m
@@ -428,6 +445,12 @@ async fn cutover_verify(
         .iter()
         .map(|s| pass_wd.shard_path(&s.path))
         .collect();
+    for shard in &full.shards {
+        manifest::verify_shard_integrity(pass_wd, shard)?;
+    }
+    for shard in &dest_index.shards {
+        manifest::verify_shard_integrity(&dest_wd, shard)?;
+    }
     let (src_url, dst_url, names) = endpoints;
     let separation =
         identity::prove_separation(&checker.pool(), src_url, dst_url, names, &source_shards)
@@ -474,18 +497,36 @@ fn fail_pass_dir(wd: &WorkDir, pass: u32) -> Result<PathBuf> {
 }
 
 /// Load `baseline.json`, defaulting to pass 0 at the work-dir root.
-fn load_baseline(wd: &WorkDir) -> Result<Baseline> {
+fn load_baseline(wd: &WorkDir, expected: &ExpectedIdentity) -> Result<Baseline> {
     let record = read_json_opt::<BaselineRecord>(&wd.baseline_json())?.unwrap_or(BaselineRecord {
         pass: 0,
         dir: ".".to_string(),
     });
-    let dir = if record.dir == "." {
+    let expected_dir = if record.pass == 0 {
+        ".".to_string()
+    } else {
+        format!("passes/pass-{:04}", record.pass)
+    };
+    anyhow::ensure!(
+        record.dir == expected_dir,
+        "baseline directory {} does not match pass {}; expected {}",
+        record.dir,
+        record.pass,
+        expected_dir
+    );
+    let dir = if record.pass == 0 {
         wd.root().to_path_buf()
     } else {
         wd.root().join(&record.dir)
     };
     let baseline_wd = WorkDir::new(&dir);
-    let manifest = manifest::load(&baseline_wd)?.ok_or_else(|| {
+    let manifest = manifest::load_validated(
+        &baseline_wd,
+        &baseline_wd.manifest_json(),
+        Some(expected),
+        ManifestKind::Canonical,
+    )?
+    .ok_or_else(|| {
         anyhow::anyhow!(
             "baseline pass {} has no manifest at {}; the work dir is damaged",
             record.pass,
@@ -526,6 +567,14 @@ fn ensure_classify(
     pass_wd: &WorkDir,
     full: &LocalManifest,
 ) -> Result<ClassifyCounts> {
+    let expected = ExpectedIdentity::from(&baseline.manifest);
+    manifest::validate(
+        &baseline.wd,
+        &baseline.manifest,
+        Some(&expected),
+        ManifestKind::Canonical,
+    )?;
+    manifest::validate(pass_wd, full, Some(&expected), ManifestKind::Canonical)?;
     let checkpoint_path = pass_wd.root().join("classify.json");
     if let Some(cp) = read_json_opt::<ClassifyCheckpoint>(&checkpoint_path)? {
         if cp.complete {
@@ -635,15 +684,32 @@ fn prune_passes(wd: &WorkDir, current_pass: u32, keep: u32) {
 mod tests {
     use super::*;
     use crate::progress::CopyProgress;
+    use arrow::array::{ArrayRef, UInt8Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
     use migration_core::records::FailurePhase;
     use migration_core::time::UtcTime;
+    use std::sync::Arc;
+
+    fn endpoint_for_test(url: &str) -> migration_core::records::Endpoint {
+        migration_core::records::Endpoint {
+            kind: migration_core::records::EndpointKind::Nfs,
+            url: url.into(),
+            root: "/".into(),
+        }
+    }
 
     #[test]
     fn baseline_defaults_to_pass_zero_root() {
         let dir = tempfile::tempdir().unwrap();
         let wd = WorkDir::new(dir.path());
         // No manifest at all: damaged/unprepared work dir.
-        let err = load_baseline(&wd).unwrap_err();
+        let expected = ExpectedIdentity {
+            run_id: "run-t".into(),
+            source: endpoint_for_test("nfs://s/e"),
+            dest: endpoint_for_test("nfs://d/e"),
+        };
+        let err = load_baseline(&wd, &expected).unwrap_err();
         assert!(format!("{err:#}").contains("baseline pass 0"), "{err:#}");
     }
 
@@ -651,6 +717,24 @@ mod tests {
     fn sync_requires_the_initial_copy_to_be_complete() {
         let dir = tempfile::tempdir().unwrap();
         let wd = WorkDir::new(dir.path());
+        std::fs::create_dir_all(wd.canonical_dir()).unwrap();
+        let shard_path = wd.canonical_dir().join("part-0000.parquet");
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::UInt8,
+            false,
+        )]));
+        let values: ArrayRef = Arc::new(UInt8Array::from(vec![1]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![values]).unwrap();
+        let mut writer = parquet::arrow::ArrowWriter::try_new(
+            std::fs::File::create(&shard_path).unwrap(),
+            schema,
+            None,
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let shard_bytes = std::fs::metadata(&shard_path).unwrap().len();
         let m = LocalManifest {
             format_version: crate::manifest::MANIFEST_FORMAT_VERSION,
             run_id: "run-t".into(),
@@ -669,14 +753,15 @@ mod tests {
             shards: vec![crate::manifest::LocalShard {
                 path: "canonical/part-0000.parquet".into(),
                 rows: 1,
-                bytes: 1,
-                sha256: "x".into(),
+                bytes: shard_bytes,
+                sha256: crate::util::sha256_file(&shard_path).unwrap(),
             }],
             total_rows: 1,
-            total_bytes: 1,
+            total_bytes: shard_bytes,
         };
+        let expected = ExpectedIdentity::from(&m);
         crate::util::write_json_atomic(&wd.manifest_json(), &m).unwrap();
-        let baseline = load_baseline(&wd).unwrap();
+        let baseline = load_baseline(&wd, &expected).unwrap();
         assert_eq!(baseline.pass, 0);
 
         // No progress.json → not copied yet.

@@ -17,7 +17,7 @@
 use crate::cli::Tuning;
 use crate::endpoint;
 use crate::identity;
-use crate::manifest::{self, LocalManifest};
+use crate::manifest::{self, ExpectedIdentity, LocalManifest, ManifestKind};
 use crate::progress::{persist_shard_results_then, write_shard_jsonl, CopyProgress};
 use crate::util::raise_fd_limit;
 use crate::workdir::WorkDir;
@@ -110,12 +110,41 @@ pub async fn run_manifest(
     manifest_name: &str,
 ) -> Result<CopySummary> {
     let wd = WorkDir::new(work_dir);
-    let m = manifest::load_file(&wd.root().join(manifest_name))?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "no {manifest_name} under {}; run `mongoose copy` first",
-            wd.root().display()
-        )
-    })?;
+    anyhow::ensure!(
+        Path::new(manifest_name)
+            .file_name()
+            .is_some_and(|n| n == manifest_name),
+        "manifest name must be a single file name"
+    );
+    let kind = if manifest_name == crate::sync::DELTA_MANIFEST {
+        ManifestKind::Delta
+    } else {
+        ManifestKind::Canonical
+    };
+    let expected = if kind == ManifestKind::Delta {
+        let root = wd
+            .root()
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(wd.root());
+        let root_wd = WorkDir::new(root);
+        let root_manifest = manifest::load(&root_wd)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "delta manifest {} has no validated root manifest",
+                wd.root().display()
+            )
+        })?;
+        Some(ExpectedIdentity::from(&root_manifest))
+    } else {
+        None
+    };
+    let m = manifest::load_validated(&wd, &wd.root().join(manifest_name), expected.as_ref(), kind)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no {manifest_name} under {}; run `mongoose copy` first",
+                wd.root().display()
+            )
+        })?;
 
     // Endpoint separation, re-proved on every run from the recorded
     // manifest (which may have been hand-edited): layers 1 and 2 —
@@ -164,7 +193,7 @@ pub async fn run_manifest(
         &src_url,
         &dst_url,
         &names,
-        &full_index_shards(&wd, &m),
+        &full_index_shards(&wd, &m)?,
     )
     .await?;
     println!("  endpoints: {}\n", separation.evidence);
@@ -204,18 +233,8 @@ pub async fn run_manifest(
             summary.interrupted = true;
             break;
         }
+        manifest::verify_shard_integrity(&wd, shard)?;
         let parquet = wd.shard_path(&shard.path);
-        let size = std::fs::metadata(&parquet)
-            .map(|md| md.len())
-            .with_context(|| format!("shard {} is missing", parquet.display()))?;
-        if size != shard.bytes {
-            anyhow::bail!(
-                "shard {} is {size} bytes; manifest says {} — the index changed since \
-                 prepare, refusing to copy from it",
-                parquet.display(),
-                shard.bytes
-            );
-        }
 
         println!("shard {} ({} rows)", shard.file_name(), shard.rows);
         downgrades.set_current_shard(shard.file_name());
@@ -350,10 +369,16 @@ pub async fn run_manifest(
 /// the identity check's search of the source tree. A delta manifest
 /// is a subset; the full index sits beside it. Falls back to the
 /// manifest being copied.
-fn full_index_shards(wd: &WorkDir, m: &LocalManifest) -> Vec<std::path::PathBuf> {
-    let full = manifest::load(wd).ok().flatten();
+fn full_index_shards(wd: &WorkDir, m: &LocalManifest) -> Result<Vec<std::path::PathBuf>> {
+    let expected = ExpectedIdentity::from(m);
+    let full = manifest::load_validated(
+        wd,
+        &wd.manifest_json(),
+        Some(&expected),
+        ManifestKind::Canonical,
+    )?;
     let shards = full.as_ref().map(|f| &f.shards).unwrap_or(&m.shards);
-    shards.iter().map(|s| wd.shard_path(&s.path)).collect()
+    Ok(shards.iter().map(|s| wd.shard_path(&s.path)).collect())
 }
 
 fn hostname() -> String {
@@ -423,7 +448,11 @@ fn spawn_ticker(
 mod tests {
     use super::*;
     use crate::manifest::{LocalShard, MANIFEST_FORMAT_VERSION};
+    use arrow::array::{ArrayRef, UInt8Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
     use migration_core::records::{Endpoint, EndpointKind, MigrationOptions};
+    use std::sync::Arc;
 
     fn tuning() -> Tuning {
         Tuning { parallel: 24 }
@@ -454,6 +483,30 @@ mod tests {
             total_rows: 1,
             total_bytes: 1,
         }
+    }
+
+    fn persist_manifest(wd: &WorkDir, m: &mut LocalManifest) {
+        std::fs::create_dir_all(wd.canonical_dir()).unwrap();
+        let shard = wd.shard_path(&m.shards[0].path);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::UInt8,
+            false,
+        )]));
+        let values: ArrayRef = Arc::new(UInt8Array::from(vec![1]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![values]).unwrap();
+        let mut writer = parquet::arrow::ArrowWriter::try_new(
+            std::fs::File::create(&shard).unwrap(),
+            schema,
+            None,
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        m.shards[0].bytes = std::fs::metadata(&shard).unwrap().len();
+        m.total_bytes = m.shards[0].bytes;
+        m.shards[0].sha256 = crate::util::sha256_file(&shard).unwrap();
+        crate::util::write_json_atomic(&wd.manifest_json(), m).unwrap();
     }
 
     #[test]
@@ -522,7 +575,7 @@ mod tests {
         m.dest.url = "nfs://h/export".into();
         m.source.root = "/".into();
         m.dest.root = "/dst".into();
-        crate::util::write_json_atomic(&wd.manifest_json(), &m).unwrap();
+        persist_manifest(&wd, &mut m);
         let err = run(dir.path(), &tuning()).await.unwrap_err();
         assert!(format!("{err:#}").contains("overlap"), "{err:#}");
     }
@@ -557,7 +610,7 @@ mod tests {
             m.dest.url = dst.into();
             m.source.root = "/".into();
             m.dest.root = "/".into();
-            crate::util::write_json_atomic(&wd.manifest_json(), &m).unwrap();
+            persist_manifest(&wd, &mut m);
             let err = run(dir.path(), &tuning()).await.unwrap_err();
             let msg = format!("{err:#}");
             assert!(msg.contains("overlap"), "{src} vs {dst}: {msg}");
@@ -571,7 +624,7 @@ mod tests {
         let wd = WorkDir::new(dir.path());
         let mut m = local_manifest();
         m.dest.url = "new-server:/export".into();
-        crate::util::write_json_atomic(&wd.manifest_json(), &m).unwrap();
+        persist_manifest(&wd, &mut m);
         let err = run(dir.path(), &tuning()).await.unwrap_err();
         assert!(format!("{err:#}").contains("manifest dest.url"), "{err:#}");
     }

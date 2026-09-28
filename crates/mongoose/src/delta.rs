@@ -8,7 +8,9 @@
 //! original `row_id`s, zstd like the rewrite. Written via `.partial` +
 //! rename, so a torn emit never passes for a finished shard.
 
-use crate::manifest::{LocalManifest, LocalShard, MANIFEST_FORMAT_VERSION};
+use crate::manifest::{
+    self, ExpectedIdentity, LocalManifest, LocalShard, ManifestKind, MANIFEST_FORMAT_VERSION,
+};
 use crate::util::{sha256_file, utc_now, write_json_atomic};
 use crate::workdir::WorkDir;
 use anyhow::{Context, Result};
@@ -29,6 +31,8 @@ use std::path::Path;
 /// kept (the trees are in sync); otherwise writes
 /// `delta-manifest.json` and returns it.
 pub fn emit(pass_wd: &WorkDir, full: &LocalManifest) -> Result<Option<LocalManifest>> {
+    let expected = ExpectedIdentity::from(full);
+    manifest::validate(pass_wd, full, Some(&expected), ManifestKind::Canonical)?;
     let keep_dir = pass_wd.classify_dir().join("keep");
     let delta_dir = pass_wd.delta_dir();
     std::fs::create_dir_all(&delta_dir)
@@ -36,6 +40,7 @@ pub fn emit(pass_wd: &WorkDir, full: &LocalManifest) -> Result<Option<LocalManif
 
     let mut shards = Vec::new();
     for shard in &full.shards {
+        manifest::verify_shard_integrity(pass_wd, shard)?;
         let src = pass_wd.shard_path(&shard.path);
         // KV-stamped by the rewrite; ShardReader::open also validates
         // the schema so a bad shard fails here, not mid-copy.
@@ -72,6 +77,7 @@ pub fn emit(pass_wd: &WorkDir, full: &LocalManifest) -> Result<Option<LocalManif
     if shards.is_empty() {
         return Ok(None);
     }
+    let (total_rows, total_bytes) = manifest::checked_totals(&shards)?;
     let delta = LocalManifest {
         format_version: MANIFEST_FORMAT_VERSION,
         run_id: full.run_id.clone(),
@@ -79,8 +85,8 @@ pub fn emit(pass_wd: &WorkDir, full: &LocalManifest) -> Result<Option<LocalManif
         source: full.source.clone(),
         dest: full.dest.clone(),
         options: full.options.clone(),
-        total_rows: shards.iter().map(|s| s.rows).sum(),
-        total_bytes: shards.iter().map(|s| s.bytes).sum(),
+        total_rows,
+        total_bytes,
         shards,
     };
     write_json_atomic(&pass_wd.delta_manifest_json(), &delta)?;
