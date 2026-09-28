@@ -1,14 +1,29 @@
 //! `mongoose` binary — parse the CLI and dispatch.
 //!
-//! Exit codes: 0 = success (including a deliberate SIGINT/SIGTERM
-//! stop — re-run the same command to resume); 1 = error, including a
-//! `--cutover` whose destination verification found mismatches (see
-//! `verify.json` in the pass dir it names); 2 = the copy completed but
-//! recorded per-file failures (see `failures/` in the work dir).
+//! Exit codes: 0 = success; 1 = fatal error, including failed cutover
+//! verification; 2 = completed copy pass with per-file failures; 130 =
+//! handled SIGINT; 143 = handled SIGTERM. Re-run interrupted work to resume.
 
 use clap::Parser;
 use mongoose::cli::{Cli, Command};
 use std::process::ExitCode;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExitOutcome {
+    Success,
+    CompletedWithFailures,
+    Interrupted(mongoose::stop::StopReason),
+    Fatal,
+}
+
+fn exit_code_for(outcome: ExitOutcome) -> ExitCode {
+    match outcome {
+        ExitOutcome::Success => ExitCode::SUCCESS,
+        ExitOutcome::CompletedWithFailures => ExitCode::from(2),
+        ExitOutcome::Interrupted(reason) => ExitCode::from(reason.exit_code()),
+        ExitOutcome::Fatal => ExitCode::FAILURE,
+    }
+}
 
 fn main() -> ExitCode {
     // Default the full reserved-port range on (libnfs checks only the
@@ -59,25 +74,67 @@ async fn async_main() -> ExitCode {
         Ok(lock) => lock,
         Err(error) => {
             eprintln!("error: {error:#}");
-            return ExitCode::FAILURE;
+            return exit_code_for(ExitOutcome::Fatal);
         }
     };
     let result = match &cli.command {
         Command::Copy(args) => match mongoose::prepare::run(args).await {
             Ok(_) => mongoose::copy::run(&args.work_dir, &args.tuning)
                 .await
-                .map(Some),
+                .map(|summary| {
+                    if summary.interrupted {
+                        ExitOutcome::Interrupted(
+                            summary.stop_reason.expect("handled stop has reason"),
+                        )
+                    } else if summary.files_failed > 0 {
+                        ExitOutcome::CompletedWithFailures
+                    } else {
+                        ExitOutcome::Success
+                    }
+                }),
             Err(e) => Err(e),
         },
-        Command::Sync(args) => mongoose::sync::run(args).await.map(|outcome| outcome.copy),
+        Command::Sync(args) => mongoose::sync::run(args).await.map(|outcome| {
+            if outcome.interrupted {
+                ExitOutcome::Interrupted(outcome.stop_reason.expect("handled stop has reason"))
+            } else if outcome.copy.is_some_and(|copy| copy.files_failed > 0) {
+                ExitOutcome::CompletedWithFailures
+            } else {
+                ExitOutcome::Success
+            }
+        }),
     };
 
     match result {
-        Ok(Some(summary)) if !summary.interrupted && summary.files_failed > 0 => ExitCode::from(2),
-        Ok(_) => ExitCode::SUCCESS,
+        Ok(outcome) => exit_code_for(outcome),
         Err(e) => {
             eprintln!("error: {e:#}");
-            ExitCode::FAILURE
+            exit_code_for(ExitOutcome::Fatal)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{exit_code_for, ExitOutcome};
+    use mongoose::stop::StopReason;
+    use std::process::ExitCode;
+
+    #[test]
+    fn exit_mapping_preserves_completed_and_interrupted_outcomes() {
+        assert_eq!(exit_code_for(ExitOutcome::Success), ExitCode::SUCCESS);
+        assert_eq!(
+            exit_code_for(ExitOutcome::CompletedWithFailures),
+            ExitCode::from(2)
+        );
+        assert_eq!(
+            exit_code_for(ExitOutcome::Interrupted(StopReason::Sigint)),
+            ExitCode::from(130)
+        );
+        assert_eq!(
+            exit_code_for(ExitOutcome::Interrupted(StopReason::Sigterm)),
+            ExitCode::from(143)
+        );
+        assert_eq!(exit_code_for(ExitOutcome::Fatal), ExitCode::FAILURE);
     }
 }

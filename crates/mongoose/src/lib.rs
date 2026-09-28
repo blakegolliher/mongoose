@@ -51,6 +51,7 @@ pub mod manifest;
 pub mod prepare;
 pub mod progress;
 pub mod scan;
+pub mod stop;
 pub mod sync;
 pub mod util;
 pub mod verify;

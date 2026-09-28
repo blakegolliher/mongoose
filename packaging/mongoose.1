@@ -121,8 +121,7 @@ when set, overrides this flag.
 .SH EXIT STATUS
 .TP
 .B 0
-Success, including a deliberate SIGINT/SIGTERM stop (re-run the same
-command to resume).
+Success.
 .TP
 .B 1
 Error (bad flags, unreachable export, not root, corrupt index), or a
@@ -135,6 +134,19 @@ Copy completed but some files failed; see
 in the work dir. The next
 .B sync
 retries them.
+.TP
+.B 130
+Interrupted by handled SIGINT. Re-run the same command to resume.
+.TP
+.B 143
+Interrupted by handled SIGTERM. Re-run the same command to resume.
+.PP
+Fatal errors take precedence over other outcomes. When a signal interrupts
+work, its status takes precedence over failures already recorded in the
+incomplete pass. Exit status 2 applies only after a pass completes. Sync does
+not advance its baseline until delta copy and requested cutover verification
+complete. The first handled signal determines the status; later signals do
+not change it.
 .SH ENVIRONMENT
 .TP
 .B RUST_LOG

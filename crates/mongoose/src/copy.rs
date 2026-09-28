@@ -19,6 +19,7 @@ use crate::endpoint;
 use crate::identity;
 use crate::manifest::{self, ExpectedIdentity, LocalManifest, ManifestKind};
 use crate::progress::{persist_shard_results_then, write_shard_jsonl, CopyProgress};
+use crate::stop::{StopReason, StopState};
 use crate::util::raise_fd_limit;
 use crate::workdir::WorkDir;
 use anyhow::{Context, Result};
@@ -33,7 +34,6 @@ use migration_worker::shard_processor::ShardProcessor;
 use migration_worker::throughput::ThroughputCounter;
 use std::path::Path;
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 
 /// How often the ticker logs live counters while a shard runs.
 const TICK_SECS: u64 = 15;
@@ -49,6 +49,8 @@ pub struct CopySummary {
     /// Stopped by SIGINT/SIGTERM at a batch boundary; re-run
     /// `mongoose copy` to resume from the interrupted shard.
     pub interrupted: bool,
+    /// First handled signal, when interrupted.
+    pub stop_reason: Option<StopReason>,
 }
 
 /// In-flight file limits for a `--parallel` level, scaled from the
@@ -98,7 +100,8 @@ pub fn mover_params(
 }
 
 pub async fn run(work_dir: &Path, tuning: &Tuning) -> Result<CopySummary> {
-    run_manifest(work_dir, tuning, "manifest.json").await
+    let stop = StopState::install()?;
+    run_manifest_with_stop(work_dir, tuning, "manifest.json", stop).await
 }
 
 /// [`run`] against a named manifest inside the work dir. `mongoose
@@ -108,6 +111,16 @@ pub async fn run_manifest(
     work_dir: &Path,
     tuning: &Tuning,
     manifest_name: &str,
+) -> Result<CopySummary> {
+    let stop = StopState::install()?;
+    run_manifest_with_stop(work_dir, tuning, manifest_name, stop).await
+}
+
+pub(crate) async fn run_manifest_with_stop(
+    work_dir: &Path,
+    tuning: &Tuning,
+    manifest_name: &str,
+    stop: StopState,
 ) -> Result<CopySummary> {
     let wd = WorkDir::new(work_dir);
     anyhow::ensure!(
@@ -176,12 +189,6 @@ pub async fn run_manifest(
         tuning.parallel,
     );
 
-    // Stop token: SIGINT/SIGTERM finishes the batch in flight and
-    // leaves the shard at the boundary. A second signal is logged and
-    // ignored (SIGKILL is the escape hatch).
-    let stop = CancellationToken::new();
-    spawn_signal_listener(stop.clone());
-
     let host_id = hostname();
     let fence = Fence::new();
     let downgrades = DowngradeSink::new();
@@ -223,14 +230,16 @@ pub async fn run_manifest(
         files_torn: progress.files_torn,
         bytes_moved: progress.bytes_moved,
         interrupted: false,
+        stop_reason: None,
     };
 
     for shard in &m.shards {
         if progress.is_completed(&shard.path) {
             continue;
         }
-        if stop.is_cancelled() {
+        if stop.token().is_cancelled() {
             summary.interrupted = true;
+            summary.stop_reason = stop.reason();
             break;
         }
         manifest::verify_shard_integrity(&wd, shard)?;
@@ -253,7 +262,7 @@ pub async fn run_manifest(
             fsid_fallback_warned: false,
             emitter: EventEmitter::disabled(),
             run_control: None,
-            stop: stop.clone(),
+            stop: stop.token(),
         };
         let outcome = processor
             .process(&parquet)
@@ -310,6 +319,7 @@ pub async fn run_manifest(
                 outcome.rows_total
             );
             summary.interrupted = true;
+            summary.stop_reason = stop.reason();
             progress.write(&wd)?;
             break;
         }
@@ -387,38 +397,6 @@ fn hostname() -> String {
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "mongoose".to_string())
-}
-
-/// Cancel `stop` on the first SIGINT/SIGTERM; later signals are logged
-/// and ignored. Shared by the copy loop and cutover verification.
-pub(crate) fn spawn_signal_listener(stop: CancellationToken) {
-    tokio::spawn(async move {
-        let mut term =
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(error = ?e, "cannot install SIGTERM handler");
-                    return;
-                }
-            };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
-        }
-        tracing::info!("stop requested; finishing the batch in flight, then leaving the shard");
-        stop.cancel();
-        // Further signals: log and keep going; the batch always
-        // finishes (SIGKILL is the escape hatch).
-        loop {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {}
-                _ = term.recv() => {}
-            }
-            tracing::warn!(
-                "already stopping; the batch in flight will finish (use SIGKILL to abandon it)"
-            );
-        }
-    });
 }
 
 fn spawn_ticker(

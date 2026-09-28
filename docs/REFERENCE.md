@@ -77,8 +77,8 @@ pruned; delete them by hand once their reports are no longer needed.
   interrupted before it re-runs against the old baseline, which at
   worst recopies redundantly.
 - SIGINT/SIGTERM stops at the next batch boundary; no file is ever
-  interrupted mid-copy. A second signal is ignored (SIGKILL abandons
-  the batch).
+  interrupted mid-copy. The first handled signal determines the exit
+  status (SIGINT `130`, SIGTERM `143`); later signals do not change it.
 - Re-running `sync --cutover` after an interruption reuses both scans
   and resumes the content read-back at its last durable checkpoint
   (`verify/content-progress.json`, written every 15 seconds). A
@@ -308,9 +308,17 @@ is not detected.
 
 | code | meaning |
 |------|---------|
-| 0    | success, including a deliberate SIGINT/SIGTERM stop (re-run to resume) |
-| 1    | error (bad flags, missing index, unreachable export, corrupt shard), or a `--cutover` whose verification found mismatches |
+| 0    | success |
+| 1    | fatal error (bad flags, missing index, unreachable export, corrupt shard), or a `--cutover` whose verification found mismatches |
 | 2    | copy completed but recorded per-file failures (see `failures/`) |
+| 130  | interrupted by handled SIGINT; re-run to resume |
+| 143  | interrupted by handled SIGTERM; re-run to resume |
+
+Fatal errors take precedence over other outcomes. When a signal interrupts
+work, its status takes precedence over per-file failures already recorded in
+the incomplete pass. Exit 2 applies only after the pass completes. A sync
+baseline advances only after delta copy and requested cutover verification
+complete, so an interrupted pass remains based on the previous baseline.
 
 ## Environment
 

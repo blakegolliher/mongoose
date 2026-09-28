@@ -43,6 +43,7 @@ use crate::identity;
 use crate::manifest::{self, ExpectedIdentity, LocalManifest, ManifestKind};
 use crate::progress::CopyProgress;
 use crate::scan::{self, ScanParams};
+use crate::stop::{StopReason, StopState};
 use crate::util::{raise_fd_limit, read_json_opt, write_json_atomic};
 use crate::verify::{self, content::LibnfsChecker, VerifyParams, VerifyReport, VerifyStatus};
 use crate::workdir::{job_excludes, WorkDir};
@@ -54,7 +55,6 @@ use migration_resync::ClassifyCounts;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use tokio_util::sync::CancellationToken;
 
 /// File name of the NEW+DIRTY manifest inside a pass dir.
 pub const DELTA_MANIFEST: &str = "delta-manifest.json";
@@ -105,6 +105,8 @@ pub struct SyncOutcome {
     /// Stopped by SIGINT/SIGTERM (copy or verification); re-run to
     /// resume this pass.
     pub interrupted: bool,
+    /// First handled signal, when interrupted.
+    pub stop_reason: Option<StopReason>,
 }
 
 pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
@@ -113,6 +115,7 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
         tracing::warn!("mongoose sync is not running as root; NFS mounts usually need sudo");
     }
     raise_fd_limit();
+    let stop = StopState::install()?;
 
     let wd = WorkDir::new(&args.work_dir);
     let root_manifest = manifest::load(&wd)?.ok_or_else(|| {
@@ -198,6 +201,7 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
         in_sync: counts.keep_rows == 0,
         verification: None,
         interrupted: false,
+        stop_reason: None,
     };
 
     if args.cutover {
@@ -228,6 +232,7 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
             &args.tuning,
             steps,
             (&src_url, &dst_url, &names),
+            stop.clone(),
         )
         .await?;
         match report.status {
@@ -240,6 +245,7 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
                 );
                 outcome.verification = Some(report);
                 outcome.interrupted = true;
+                outcome.stop_reason = stop.reason();
                 return Ok(outcome);
             }
             VerifyStatus::Fail => {
@@ -304,25 +310,36 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
             delta.total_rows,
             delta.total_bytes
         );
-        let summary = copy::run_manifest(pass_wd.root(), &args.tuning, DELTA_MANIFEST).await?;
+        let summary = copy::run_manifest_with_stop(
+            pass_wd.root(),
+            &args.tuning,
+            DELTA_MANIFEST,
+            stop.clone(),
+        )
+        .await?;
         let interrupted = summary.interrupted;
+        let stop_reason = summary.stop_reason;
         outcome.copy = Some(summary);
         if interrupted {
             println!("sync interrupted; re-run `mongoose sync` to resume this pass");
             outcome.interrupted = true;
+            outcome.stop_reason = stop_reason;
             return Ok(outcome);
         }
     }
 
+    // A handled stop at the last stage boundary must leave the old
+    // baseline in place. Once the atomic baseline write starts, the
+    // pass is the committed result.
+    if !write_baseline_if_running(&wd, pass, &stop)? {
+        outcome.interrupted = true;
+        outcome.stop_reason = stop.reason();
+        println!("sync interrupted before baseline advance; re-run to resume this pass");
+        return Ok(outcome);
+    }
+
     // ---- 5/6. advance the baseline (pass commit point) ----------------
     println!("[{steps}/{steps}] advance baseline to pass {pass}");
-    write_json_atomic(
-        &wd.baseline_json(),
-        &BaselineRecord {
-            pass,
-            dir: format!("passes/pass-{pass:04}"),
-        },
-    )?;
     prune_passes(&wd, pass, KEEP_PASSES);
 
     // The baseline has advanced: this pass's raw scan and its delta
@@ -365,6 +382,20 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
     Ok(outcome)
 }
 
+fn write_baseline_if_running(wd: &WorkDir, pass: u32, stop: &StopState) -> Result<bool> {
+    if stop.token().is_cancelled() {
+        return Ok(false);
+    }
+    write_json_atomic(
+        &wd.baseline_json(),
+        &BaselineRecord {
+            pass,
+            dir: format!("passes/pass-{pass:04}"),
+        },
+    )?;
+    Ok(true)
+}
+
 /// The rescan of the source: same URL, workers, and excludes as
 /// prepare's pass-0 scan.
 pub fn source_scan_params(root: &LocalManifest, exclude: &[String], tuning: &Tuning) -> ScanParams {
@@ -401,6 +432,7 @@ async fn cutover_verify(
     tuning: &Tuning,
     steps: usize,
     endpoints: (&endpoint::NfsUrl, &endpoint::NfsUrl, &NameEvidence),
+    stop: StopState,
 ) -> Result<VerifyReport> {
     let dest_wd = WorkDir::new(pass_wd.dest_dir());
     std::fs::create_dir_all(dest_wd.root())
@@ -456,8 +488,6 @@ async fn cutover_verify(
         identity::prove_separation(&checker.pool(), src_url, dst_url, names, &source_shards)
             .await?;
     println!("  endpoints: {}", separation.evidence);
-    let stop = CancellationToken::new();
-    copy::spawn_signal_listener(stop.clone());
     let params = VerifyParams {
         run_id: root.run_id.clone(),
         pass,
@@ -473,7 +503,7 @@ async fn cutover_verify(
         concurrency: tuning.parallel.max(1) as usize,
         buckets: CLASSIFY_BUCKETS,
     };
-    verify::run(pass_wd, &params, checker, stop).await
+    verify::run(pass_wd, &params, checker, stop.token()).await
 }
 
 /// Move a pass whose cutover verification failed to
@@ -711,6 +741,20 @@ mod tests {
         };
         let err = load_baseline(&wd, &expected).unwrap_err();
         assert!(format!("{err:#}").contains("baseline pass 0"), "{err:#}");
+    }
+
+    #[test]
+    fn interrupted_sync_does_not_advance_the_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let wd = WorkDir::new(dir.path());
+        let stop = StopState::new();
+        assert!(write_baseline_if_running(&wd, 3, &stop).unwrap());
+        stop.request(StopReason::Sigterm);
+        assert!(!write_baseline_if_running(&wd, 4, &stop).unwrap());
+        let baseline: BaselineRecord = crate::util::read_json_opt(&wd.baseline_json())
+            .unwrap()
+            .expect("baseline remains present");
+        assert_eq!(baseline.pass, 3);
     }
 
     #[test]
