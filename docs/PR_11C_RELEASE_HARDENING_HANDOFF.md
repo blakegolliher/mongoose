@@ -5,10 +5,10 @@ Status (2026-09-29):
 - **11C-1, libnfs archive reproducibility:** merged in PR #10 (`2e7e712`).
 - **11C-2, release gate hardening:** implemented on branch
   `pr-11c-release-gates`.
-- **11C-3, SBOM, signed checksums, and provenance:** decided (GitHub
+- **11C-3, SBOM, signed checksums, and provenance:** approved (GitHub
   Actions with Sigstore, and a CycloneDX SBOM); next after 11C-2 merges.
-- **11C-4, real-NFS qualification and the release record:** waiting on the
-  owner decisions below.
+- **11C-4, real-NFS qualification and the release record:** defaults
+  approved; waiting on the owner's NFS and client-host inventory.
 
 This is the third slice of PR-11 in `docs/PRODUCTION_RELEASE_HANDOFF.md`. It
 covers PR-11's required outcomes 4 to 8, and the acceptance items about
@@ -71,7 +71,7 @@ Acceptance for 11C-2:
 - the artifact gate fails against a binary built without the AES-NI check;
 - hosted CI is green.
 
-## 11C-3 — SBOM, signed checksums, and provenance (decided)
+## 11C-3 — SBOM, signed checksums, and provenance (approved)
 
 Maps to PR-11 required outcome 7, and to "publishes checksums/provenance only
 after every software and hardware gate succeeds". Today, the only integrity
@@ -80,48 +80,71 @@ artifacts.
 
 Owner decisions (2026-09-29):
 
-- **Build and sign in a GitHub Actions release workflow with Sigstore.** The
-  alternative, an owner-held key on the release host, is rejected.
-- **Ship a CycloneDX JSON SBOM.**
+- **Build and sign in a GitHub Actions release workflow with Sigstore.** An
+  owner-held key on the release host was rejected: it would show who signed
+  the files, but not how they were built.
+- **Ship a CycloneDX JSON SBOM.** Besides the Cargo graph, it must list two
+  components that Cargo does not describe fully:
+  - the statically linked libnfs: C source at the locked revision, under
+    LGPL-2.1-or-later, with the locked archive digest;
+  - the git-pinned nfs-walker at its locked revision.
 
-The options that were weighed:
+**Required order.** Nothing may be rebuilt or regenerated between gating,
+signing, and publishing:
 
-1. **Where release artifacts are built and signed.**
-   - **Recommended: a GitHub Actions release workflow**, dispatched on a tag.
-     It runs `make release`, including the artifact gate, on a GitHub runner
-     with the locked toolchain. This is now possible because the libnfs
-     archive is path-independent. The workflow then produces GitHub artifact
-     attestations (SLSA build provenance, signed by Sigstore without a
-     long-lived key) and a signed `SHA256SUMS`. Publishing waits for a
-     protected environment that the owner approves after 11C-4's hardware
-     qualification. There are no keys to manage, and anyone can verify which
-     workflow, commit, and runner built each artifact.
-   - **Alternative: keep building on the owner's release host.** The owner
-     signs `SHA256SUMS` with a key they hold (minisign or GPG), and its public
-     key is published in the repository. This gives no build provenance beyond
-     the signature, and the key has to be protected and rotated.
-2. **SBOM format.** CycloneDX JSON (recommended, via `cargo-cyclonedx`) or
-   SPDX JSON. Either way, the SBOM must add two components that Cargo does not
-   list:
-   - the statically linked libnfs, as C source at the locked revision under
-     LGPL-2.1-or-later;
-   - the git-pinned nfs-walker.
+1. Build all release artifacts.
+2. Generate the CycloneDX SBOM and validate it.
+3. Generate the final `SHA256SUMS`, including the SBOM.
+4. Run the complete release gate and LGPL gate.
+5. Freeze those exact bytes.
+6. Sign `SHA256SUMS`, and attest the artifacts.
+7. After approval in the protected environment, publish only those
+   already-gated files.
 
-   The SBOM would be published as a release asset and listed in `SHA256SUMS`.
+Signature bundles and attestations are metadata outside the artifact list in
+`SHA256SUMS`. The publish step must account for them explicitly: it uploads
+the gated files, `SHA256SUMS`, and the signature bundle, and nothing else.
 
-## 11C-4 — real-NFS qualification and the release record (owner decisions)
+**Workflow requirements:**
+
+- Pin every third-party Action by full commit SHA.
+- Grant only the `contents`, `id-token`, and `attestations` permissions, and
+  only to the jobs that need them.
+- Fail unless the tag, the Cargo version, and the checked-out commit agree.
+- Attest every published artifact, including the source bundle and the LGPL
+  relink bundle.
+- Pass the gated artifact set between jobs by digest. Every later job
+  re-verifies each file against the frozen digests before it signs, attests,
+  or publishes.
+- Prove, from a clean environment and with documented commands, that a
+  downloader can verify the signature on `SHA256SUMS`, each file's
+  attestation, and each file's checksum.
+
+## 11C-4 — real-NFS qualification and the release record (defaults approved)
 
 Maps to PR-11 required outcome 8 and to the production exit criteria.
-GitHub-hosted runners cannot reach the NFS systems, so this needs:
+GitHub-hosted runners cannot reach the NFS systems.
 
-- the qualification environment: servers, exports, and the client host;
-- who approves, and how. Recommended: a protected GitHub environment with the
-  owner as required reviewer, whose approval attaches the qualification
-  record;
-- a release-record format. It lists the exact artifact digests, the
-  software-gate results, the hardware results from the exclusion, scan-error,
-  cutover, overlap, crash, concurrency, and torn-copy tests named in the exit
-  criteria, and the approval.
+Approved defaults (2026-09-29):
+
+- The project owner approves releases.
+- Qualification runs the exact attested binary from 11C-3, checked against
+  its attested digest, never a rebuild.
+- Each release gets a record in two forms, machine-readable JSON and readable
+  Markdown. The record contains:
+  - the commit and tag, and the artifact digests;
+  - the environment details and the NFS configuration;
+  - the commands run, their results, and timestamps;
+  - the digests of the logs;
+  - the approval.
+- The required tests are the hardware tests named in the production exit
+  criteria: exclusion, scan-error, cutover, alias overlap, crash,
+  concurrency, and torn-copy.
+- A missing or failed required test blocks publication. There are no silent
+  waivers.
+
+Remaining input from the owner: the inventory of NFS servers and exports, and
+of client hosts.
 
 ## Non-goals for 11C-2
 

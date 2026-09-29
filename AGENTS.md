@@ -32,3 +32,6 @@ credit an AI assistant. That means no co-author or other trailer naming one,
 no "generated with" line, no assistant session link, and no AI author or
 committer identity. The `attribution` check (`scripts/check-attribution.sh`)
 enforces this on every pull request and every push to `main`.
+
+The rule applies from now on. Commits merged before it are not rewritten.
+Never rewrite history, move published tags, or delete branches to hide them.
