@@ -631,16 +631,12 @@ cold runner with 732 tests passed, 0 failed, and 28 ignored. Throwaway PRs
 and `shellcheck` gates as intended. PR-11B, PR-11C, and real-NFS hardware
 qualification remain release blockers.
 
-Recorded for PR-11C (2026-09-29): the locked `libnfs.a` digest is not
-independent of Zig's installation path. Rebuilding the locked source with the
-locked tool versions in a clean `ubuntu:24.04` container, but with Zig at a
-different path, produced a different SHA-256. The machine code was identical;
-the Zig path (`/snap/zig/<revision>/lib/...`) leaks into debug metadata. PR-11C
-must make the archive build independent of that path, re-pin through the normal
-LGPL review, and only then let CI enforce the digest. Until then, `make release`
-keeps enforcing the locked digest in its locked release environment, and
-PR-11A CI builds a disposable, unpinned archive from the same source for tests
-only.
+Recorded for PR-11C (2026-09-29): the locked `libnfs.a` digest used to depend
+on Zig's install path, which leaked into debug metadata. PR #10 (`2e7e712`)
+maps that path to a fixed name, re-pins the digest, and makes CI enforce it.
+The rest of PR-11C (release gate hardening; SBOM, signing, and provenance;
+real-NFS qualification) is tracked in
+`docs/PR_11C_RELEASE_HARDENING_HANDOFF.md`.
 
 ### Problem
 

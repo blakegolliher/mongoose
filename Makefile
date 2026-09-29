@@ -25,12 +25,10 @@
 #
 # Requires: rpmbuild (`rpm`), dpkg-deb (`deb`), and for portable
 # builds cargo-zigbuild + zig (versions pinned in
-# packaging/release-toolchain.lock.json).
+# packaging/release-toolchain.lock.json and checked by `toolchain-check`).
+# `release` also needs podman for the package install smoke tests.
 
 VERSION  ?= $(shell sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n1)
-UNAME_M  := $(shell uname -m)
-RPM_ARCH := $(UNAME_M)
-DEB_ARCH := $(shell dpkg --print-architecture 2>/dev/null || echo amd64)
 
 GLIBC        := 2.34
 TRIPLE       := x86_64-unknown-linux-gnu
@@ -42,22 +40,30 @@ ZIG ?= $(shell if [ -x /snap/zig/current/zig ]; then echo /snap/zig/current/zig;
 
 PORTABLE ?= 1
 ifeq ($(PORTABLE),1)
-BIN        := target/$(TRIPLE)/release/mongoose
-BUILD_RULE := build-portable
+BIN          := target/$(TRIPLE)/release/mongoose
+BUILD_RULE   := build-portable
+BUILD_TRIPLE := $(TRIPLE)
 else
-BIN        := target/release/mongoose
-BUILD_RULE := build
+BIN          := target/release/mongoose
+BUILD_RULE   := build
+BUILD_TRIPLE := $(shell rustc -vV | sed -n 's/^host: //p')
 endif
+
+# Package and asset architecture labels come from the triple the packaged
+# binary was built for, never from the machine that happens to run make.
+TARGET_ARCH := $(firstword $(subst -, ,$(BUILD_TRIPLE)))
+RPM_ARCH    := $(TARGET_ARCH)
+DEB_ARCH    := $(if $(filter x86_64,$(TARGET_ARCH)),amd64,$(if $(filter aarch64,$(TARGET_ARCH)),arm64,$(error no Debian architecture for $(TARGET_ARCH))))
 
 PKGDIR   := packaging
 DIST     := dist
 
 RPM_OUT  := $(DIST)/mongoose-$(VERSION)-1.$(RPM_ARCH).rpm
 DEB_OUT  := $(DIST)/mongoose_$(VERSION)-1_$(DEB_ARCH).deb
-TAR_OUT  := $(DIST)/mongoose-$(VERSION)-linux-$(UNAME_M).tar.gz
+TAR_OUT  := $(DIST)/mongoose-$(VERSION)-linux-$(TARGET_ARCH).tar.gz
 # Unversioned on purpose: the README's install snippet fetches it via
 # releases/latest/download/, which needs a stable asset name.
-BIN_OUT  := $(DIST)/mongoose-linux-$(UNAME_M)
+BIN_OUT  := $(DIST)/mongoose-linux-$(TARGET_ARCH)
 SUMS_OUT := $(DIST)/SHA256SUMS
 SOURCE_OUT := $(DIST)/mongoose-$(VERSION)-source.tar.gz
 RELINK_OUT := $(DIST)/mongoose-$(VERSION)-relink-kit.tar.gz
@@ -70,7 +76,7 @@ COMPLIANCE_ASSETS := \
 	$(DIST)/LICENSE-MIT $(DIST)/LICENSE-LGPL-2.1.txt \
 	$(DIST)/LICENSE-BSD-2-Clause-libnfs.txt
 
-.PHONY: all build build-portable libnfs-stage stage-check compliance-check release-materials rpm deb tarball binary release clean
+.PHONY: all build build-portable toolchain-check libnfs-stage stage-check compliance-check release-materials rpm deb tarball binary release clean
 
 all: build
 
@@ -81,7 +87,7 @@ build:
 # Both env vars point at the stage: VAMOOSE_LIBNFS_DIR for the mover's
 # build.rs, NFS_WALKER_LIBNFS_DIR for the embedded walker's. After the
 # build, refuse any binary whose glibc requirement exceeds $(GLIBC).
-build-portable: stage-check
+build-portable: toolchain-check stage-check
 	VAMOOSE_LIBNFS_DIR=$(LIBNFS_STAGE) \
 	NFS_WALKER_LIBNFS_DIR=$(LIBNFS_STAGE) \
 	CARGO_ZIGBUILD_ZIG_PATH=$(ZIG) \
@@ -97,9 +103,14 @@ build-portable: stage-check
 		exit 1; \
 	fi
 
+# Every tool version in packaging/release-toolchain.lock.json, verified.
+toolchain-check:
+	ZIG=$(ZIG) ./scripts/check-release-toolchain.sh
+
 libnfs-stage:
 	mkdir -p $(LIBNFS_STAGE)
 	ZIG=$(ZIG) \
+	EXPECTED_ZIG_VERSION=$$(jq -r .zig packaging/release-toolchain.lock.json) \
 	EXPECTED_LIBNFS_SHA256=$$(jq -r .static_artifact_sha256 $(LIBNFS_LOCK)) \
 	./scripts/build-libnfs-static.sh --source "$(LIBNFS_SOURCE)" --output "$(LIBNFS_STAGE)"
 
@@ -191,6 +202,8 @@ release: release-materials rpm deb tarball binary
 	cd $(DIST) && sha256sum \
 		$(notdir $(RPM_OUT) $(DEB_OUT) $(TAR_OUT) $(BIN_OUT) $(COMPLIANCE_ASSETS)) \
 		> $(notdir $(SUMS_OUT))
+	./scripts/check-release-artifacts.sh --release-dir "$(DIST)" --version "$(VERSION)" \
+		--binary "$(BIN_OUT)" --rpm "$(RPM_OUT)" --deb "$(DEB_OUT)" --tarball "$(TAR_OUT)"
 	@echo
 	@echo "release artifacts:"
 	@ls -l $(RPM_OUT) $(DEB_OUT) $(TAR_OUT) $(BIN_OUT) $(COMPLIANCE_ASSETS) $(SUMS_OUT)
