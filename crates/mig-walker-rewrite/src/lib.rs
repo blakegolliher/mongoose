@@ -11,8 +11,8 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use arrow::array::{
-    Array, ArrayRef, BinaryBuilder, Int32Array, Int32Builder, Int64Array, Int64Builder,
-    StringArray, UInt16Array, UInt32Array, UInt64Array, UInt64Builder, UInt8Builder,
+    Array, ArrayRef, BinaryArray, BinaryBuilder, Int32Array, Int32Builder, Int64Array,
+    Int64Builder, StringArray, UInt16Array, UInt32Array, UInt64Array, UInt64Builder, UInt8Builder,
 };
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
@@ -672,7 +672,7 @@ fn translate_batch(
 
     // Required walker columns. Pluck them up front; clear errors if
     // absent or wrong type.
-    let walker_path = req_string(input, "path")?;
+    let walker_path = req_walker_path(input)?;
     let walker_file_type = req_string(input, "file_type")?;
     let walker_permissions = req_u16(input, "permissions")?;
     let walker_mtime_us = opt_int64_required_col(input, "mtime_us")?;
@@ -708,7 +708,7 @@ fn translate_batch(
         let row_in_shard = row_offset_in_shard + i as u64;
         row_id_b.append_value(schema::make_row_id(shard_idx, row_in_shard));
 
-        let raw_path = walker_path.value(i).as_bytes();
+        let raw_path = walker_path.value(i)?;
         let translated_path = strip_source_root(raw_path, source_root)?;
         path_b.append_value(&translated_path);
 
@@ -962,6 +962,44 @@ fn req_string<'a>(b: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {
     arr.as_any()
         .downcast_ref::<StringArray>()
         .ok_or_else(|| anyhow!("walker column `{name}` is not Utf8"))
+}
+
+/// Authoritative walker path column. New scans carry raw POSIX bytes in
+/// `path_bytes`; older scans remain readable through their necessarily-UTF-8
+/// `path` column.
+enum WalkerPathColumn<'a> {
+    Binary(&'a BinaryArray),
+    LegacyUtf8(&'a StringArray),
+}
+
+impl<'a> WalkerPathColumn<'a> {
+    fn value(&self, row: usize) -> Result<&'a [u8]> {
+        match self {
+            Self::Binary(array) => {
+                if array.is_null(row) {
+                    bail!("walker column `path_bytes` is null at row {row}");
+                }
+                Ok(array.value(row))
+            }
+            Self::LegacyUtf8(array) => {
+                if array.is_null(row) {
+                    bail!("walker column `path` is null at row {row}");
+                }
+                Ok(array.value(row).as_bytes())
+            }
+        }
+    }
+}
+
+fn req_walker_path(b: &RecordBatch) -> Result<WalkerPathColumn<'_>> {
+    if let Some(array) = b.column_by_name("path_bytes") {
+        let array = array
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .ok_or_else(|| anyhow!("walker column `path_bytes` is not Binary"))?;
+        return Ok(WalkerPathColumn::Binary(array));
+    }
+    Ok(WalkerPathColumn::LegacyUtf8(req_string(b, "path")?))
 }
 
 fn req_u16<'a>(b: &'a RecordBatch, name: &str) -> Result<&'a UInt16Array> {
@@ -1307,6 +1345,23 @@ mod tests {
         RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), columns).unwrap()
     }
 
+    fn append_column(batch: &RecordBatch, name: &str, array: ArrayRef) -> RecordBatch {
+        let mut fields: Vec<Field> = batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect();
+        fields.push(Field::new(
+            name,
+            array.data_type().clone(),
+            array.null_count() > 0,
+        ));
+        let mut columns = batch.columns().to_vec();
+        columns.push(array);
+        RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), columns).unwrap()
+    }
+
     /// Write a walker-shape batch to `<dir>/part-r00-00000.parquet`
     /// the way the walker would (no KV footer — the shim adds that).
     fn write_walker_parquet(dir: &Path, batch: &RecordBatch) -> PathBuf {
@@ -1623,6 +1678,45 @@ mod tests {
                 "retyping `{name}`: unexpected error: {msg}"
             );
         }
+    }
+
+    #[test]
+    fn raw_path_bytes_are_preferred_and_preserved() {
+        let batch = append_column(
+            &synthetic_walker_batch("/src-test"),
+            "path_bytes",
+            Arc::new(BinaryArray::from_vec(vec![
+                b"/src-test".as_slice(),
+                b"/src-test/bad-\xff.bin",
+                b"/src-test/link",
+            ])),
+        );
+
+        let translated = translate_batch(&batch, 0, 0, b"/src-test").unwrap();
+        let paths = translated
+            .column_by_name(schema::COL_PATH)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        assert_eq!(paths.value(0), b"/");
+        assert_eq!(paths.value(1), b"/bad-\xff.bin");
+        assert_eq!(paths.value(2), b"/link");
+    }
+
+    #[test]
+    fn raw_path_bytes_wrong_type_is_rejected_instead_of_falling_back() {
+        let batch = append_column(
+            &synthetic_walker_batch("/src-test"),
+            "path_bytes",
+            Arc::new(StringArray::from(vec!["/src-test"; 3])),
+        );
+        let err = translate_batch(&batch, 0, 0, b"/src-test").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("walker column `path_bytes` is not Binary"),
+            "{err:#}"
+        );
     }
 
     #[test]

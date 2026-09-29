@@ -136,6 +136,9 @@ the analytics dashboard. **New consumers must not read these.**
 | `allocated_blocks` | `UInt64` | Disk blocks allocated. Used by dashboard's allocation-waste page; not used by mover in M-series. |
 | `depth` | `UInt16` | Directory depth from scan root. |
 | `parent_path` | `Utf8` | UTF-8 parent directory. |
+| `path_bytes` | `Binary` | Transitional walker column containing the exact absolute path bytes, including the export-root prefix. The rewrite shim prefers this over the legacy UTF-8 path; native canonical walker output will replace it with canonical relative `path`. |
+| `filename_bytes` | `Binary` | Exact basename bytes for the walker analytics schema. |
+| `parent_path_bytes` | `Binary` | Exact absolute parent-directory bytes for the walker analytics schema. |
 | `scan_id` | `Utf8` | Walker scan UUID. |
 | `scan_timestamp_us` | `Int64` | Walker start time. |
 | `checksum` | `Utf8` (nullable) | gxhash, when walker `-c` flag is used. |
@@ -420,6 +423,10 @@ Future keys may be added; mover ignores keys it doesn't recognize.
 | Version | Change |
 |---|---|
 | 1 | Initial contract. |
+
+The walker-to-shim input schema may grow additive columns without changing the
+canonical format version. Raw-byte path columns were added this way; canonical
+output remains format version 1.
 
 ### Decisions baked into v1 (with rationale for future readers)
 
