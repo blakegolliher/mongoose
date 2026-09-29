@@ -12,6 +12,10 @@
 //! Plus a few sad paths: bad cluster secret → 401, unknown worker →
 //! 404, retryability classification.
 
+// Exercises the orchestrator or the coordinator client, which exist
+// only with the `distributed` feature.
+#![cfg(feature = "distributed")]
+
 use chrono::{TimeZone, Utc};
 use migration_control_protocol::schema::HeartbeatBody;
 use migration_control_protocol::schema::{

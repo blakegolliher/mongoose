@@ -18,7 +18,9 @@ path = "src/main.rs"
 [dependencies]
 migration-core     = { workspace = true }
 migration-mover    = { workspace = true }
-migration-worker   = { path = "../migration-worker" }
+# No `distributed` feature: mongoose needs shard processing only, not
+# the S3 orchestrator or the coordinator HTTP client (PR-11B).
+migration-worker   = { path = "../migration-worker", default-features = false }
 mig-walker-rewrite = { path = "../mig-walker-rewrite" }
 migration-resync   = { path = "../migration-resync" }
 arrow              = { workspace = true }

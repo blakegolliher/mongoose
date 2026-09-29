@@ -102,7 +102,7 @@ pub struct ShardProcessor {
     /// call is a no-op); when enabled, `record_outcome` pushes a
     /// `WorkerEventDraft` per file outcome so the coord_driver can
     /// coalesce a `ProgressDelta` for `/workers/{id}/events`.
-    pub emitter: crate::coord_driver::EventEmitter,
+    pub emitter: crate::events::EventEmitter,
     /// Coord-driven run control, consulted between batches for
     /// `Pause`. `None` in S3-only mode (no `[coord]`).
     pub run_control: Option<crate::run_control::RunControlReader>,
@@ -466,7 +466,7 @@ fn record_outcome(
     outcome: &mut ProcessOutcome,
     failures: &FailureSink,
     throughput: &ThroughputCounter,
-    emitter: &crate::coord_driver::EventEmitter,
+    emitter: &crate::events::EventEmitter,
 ) {
     match mo.result {
         Ok(()) => {
@@ -764,7 +764,7 @@ mod tests {
             &mut outcome,
             &sink,
             &throughput,
-            &crate::coord_driver::EventEmitter::disabled(),
+            &crate::events::EventEmitter::disabled(),
         );
 
         assert_eq!(outcome.files_fenced, 1, "Fenced must bump files_fenced");
@@ -798,7 +798,7 @@ mod tests {
             &mut outcome,
             &sink,
             &throughput,
-            &crate::coord_driver::EventEmitter::disabled(),
+            &crate::events::EventEmitter::disabled(),
         );
 
         assert_eq!(outcome.files_failed, 1);
@@ -827,7 +827,7 @@ mod tests {
             &mut outcome,
             &sink,
             &throughput,
-            &crate::coord_driver::EventEmitter::disabled(),
+            &crate::events::EventEmitter::disabled(),
         );
 
         assert_eq!(outcome.files_ok, 1);
@@ -902,7 +902,7 @@ mod tests {
             &mut outcome,
             &sink,
             &throughput,
-            &crate::coord_driver::EventEmitter::disabled(),
+            &crate::events::EventEmitter::disabled(),
         );
 
         assert_eq!(outcome.files_torn, 1, "torn commit must bump files_torn");

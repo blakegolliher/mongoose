@@ -64,6 +64,7 @@ pub enum Error {
     )]
     SourceDestOverlap { detail: String },
 
+    #[cfg(feature = "s3")]
     #[error("S3: {0}")]
     S3(#[from] aws_sdk_s3::Error),
 

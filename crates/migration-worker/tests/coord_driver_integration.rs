@@ -5,6 +5,10 @@
 //! Counterpart to `tests/coord_client_integration.rs` (which
 //! exercises the HTTP layer in isolation).
 
+// Exercises the orchestrator or the coordinator client, which exist
+// only with the `distributed` feature.
+#![cfg(feature = "distributed")]
+
 use chrono::{TimeZone, Utc};
 use migration_control_protocol::schema::{ConfigHash, EventKind, JobId, WorkerState};
 use migration_coord::lease::{Identity, LeaseConfig};

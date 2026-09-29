@@ -14,7 +14,7 @@
 //! VAMOOSE_TEST_S3_REGION=us-east-1                # optional, default us-east-1
 //! VAMOOSE_TEST_S3_BUCKET=vamoose
 //! VAMOOSE_TEST_S3_PROFILE=var204                  # optional
-//! VAMOOSE_TEST_S3_VERIFY_TLS=0                    # optional, default 0 (matches var204)
+//! VAMOOSE_TEST_S3_VERIFY_TLS=1                    # optional, default 1; 0 is rejected
 //! ```
 //!
 //! ## Run manually
@@ -72,9 +72,12 @@ async fn make_store() -> Option<PrefixedStore<S3Store>> {
     let bucket = env_or_skip("VAMOOSE_TEST_S3_BUCKET")?;
     let region = std::env::var("VAMOOSE_TEST_S3_REGION").unwrap_or_else(|_| "us-east-1".into());
     let profile = std::env::var("VAMOOSE_TEST_S3_PROFILE").ok();
-    let verify_tls = matches!(
+    // Verified TLS unless explicitly disabled. A disabled value reaches
+    // `S3Client::from_config`, which rejects it like any `[run]
+    // verify_tls = false` (PR-11B).
+    let verify_tls = !matches!(
         std::env::var("VAMOOSE_TEST_S3_VERIFY_TLS").as_deref(),
-        Ok("1") | Ok("true")
+        Ok("0") | Ok("false")
     );
 
     let client = S3Client::from_config(&endpoint, &region, &bucket, profile.as_deref(), verify_tls)

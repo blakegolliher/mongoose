@@ -16,7 +16,8 @@ publish     = false
 test-helpers = []
 
 [dependencies]
-migration-core = { workspace = true }
+# `S3Store` keeps the lease, snapshots, event log, and archive in S3.
+migration-core = { workspace = true, features = ["s3"] }
 migration-control-protocol = { workspace = true }
 
 tokio       = { workspace = true }

@@ -8,7 +8,8 @@
 //! - The S3 layout and key conventions (`layout`)
 //! - The claim protocol — conditional PUT semantics, heartbeat,
 //!   self-fence (`claim`)
-//! - S3 client wrappers used by both worker and aggregator (`s3`)
+//! - S3 client wrappers used by both worker and aggregator (`s3`,
+//!   only with the `s3` feature)
 //! - Parquet shard reader that mmaps a local file and streams rows
 //!   in `row_id` order (`shard`)
 //!
@@ -32,6 +33,7 @@ pub mod layout;
 pub mod overlap;
 pub mod prepare_tools;
 pub mod records;
+#[cfg(feature = "s3")]
 pub mod s3;
 pub mod schema;
 pub mod shard;

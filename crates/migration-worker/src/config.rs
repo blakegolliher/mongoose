@@ -49,8 +49,9 @@ pub struct RunCfg {
     #[serde(default)]
     pub profile: Option<String>,
     /// Whether to verify the TLS certificate of the S3 endpoint.
-    /// Default: true. Set to false for lab/dev environments with
-    /// self-signed certs. Equivalent to `aws-cli --no-verify-ssl`.
+    /// Default: true. `false` still parses, so existing configs load,
+    /// but S3 client startup rejects it: certificate verification
+    /// cannot be disabled (PR-11B). Unrelated to `[coord] verify_tls`.
     #[serde(default = "default_verify_tls")]
     pub verify_tls: bool,
 }

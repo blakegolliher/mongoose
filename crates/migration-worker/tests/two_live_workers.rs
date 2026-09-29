@@ -19,6 +19,10 @@
 //!   after acquiring must still be reclaimed once the grace window
 //!   elapses, long before the lease window.
 
+// Exercises the orchestrator or the coordinator client, which exist
+// only with the `distributed` feature.
+#![cfg(feature = "distributed")]
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
