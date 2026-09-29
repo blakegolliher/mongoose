@@ -1,7 +1,7 @@
 # PR-11A handoff — green workspace and baseline CI
 
-Status: **ready for implementation** (amended 2026-09-29: CI links the pinned
-libnfs fork; minimal worker fixture specified)
+Status: **implemented** in PR #2 (2026-09-29). The hosted run is green, and
+the negative tests in PRs #3 and #4 failed at the intended gates.
 
 Suggested implementer: Luna or another lower-cost implementation model, with
 human review of the workflow permissions and final required-check settings.
