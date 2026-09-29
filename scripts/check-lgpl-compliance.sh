@@ -64,7 +64,8 @@ for path in \
     packaging/licenses/BSD-2-Clause-libnfs.txt \
     packaging/relink-kit/verify-relink.sh \
     scripts/build-libnfs-static.sh \
-    scripts/build-lgpl-release-materials.sh; do
+    scripts/build-lgpl-release-materials.sh \
+    scripts/check-cargo-source-map.sh; do
     need_file "$path"
 done
 
@@ -132,6 +133,7 @@ need_text "$release_dir/LIBNFS_SOURCE.md" "$libnfs_sha"
 need_text "$release_dir/LIBNFS_SOURCE.md" 'relink'
 need_text "$release_dir/RELINK-VERIFICATION.txt" "$libnfs_sha"
 need_text "$release_dir/RELINK-VERIFICATION.txt" 'PASS'
+need_text "$release_dir/RELINK-VERIFICATION.txt" 'isolated, empty CARGO_HOME'
 
 command -v readelf >/dev/null 2>&1 || fail "readelf is required for the release artifact check"
 dynamic_section=$(readelf -d "$binary" 2>/dev/null) || fail "cannot inspect dynamic dependencies for $binary"
@@ -165,6 +167,21 @@ grep -Eq '(^|/)verify-relink\.sh$' <<<"$relink_listing" || fail "relink kit omit
 grep -Eq '(^|/)mongoose/vendor/[^/]+/Cargo\.toml$' <<<"$relink_listing" || fail "relink kit omits vendored Rust dependencies"
 grep -Eq '(^|/)mongoose/Cargo\.lock$' <<<"$relink_listing" || fail "relink kit omits mongoose Cargo.lock"
 grep -Eq '(^|/)libnfs/CMakeLists\.txt$' <<<"$relink_listing" || fail "relink kit omits libnfs source"
+
+# The packaged kit must build from its own vendor/: its source map must cover
+# every locked source and package, and it must resolve with an empty Cargo
+# home (no registry index, crate cache, or git checkout) and no network.
+command -v cargo >/dev/null 2>&1 || fail "cargo is required to resolve the packaged relink kit"
+kit_check=$(mktemp -d "${TMPDIR:-/tmp}/mongoose-kit-check.XXXXXX")
+trap 'rm -rf -- "$kit_check"' EXIT
+tar -xzf "$relink_bundle" -C "$kit_check" || fail "cannot extract relink kit: $relink_bundle"
+kit_mongoose="$kit_check/mongoose-$version-relink-kit/mongoose"
+test -d "$kit_mongoose" || fail "relink kit is not rooted at mongoose-$version-relink-kit/"
+./scripts/check-cargo-source-map.sh "$kit_mongoose" \
+    || fail "packaged relink kit has an incomplete offline source map"
+(cd "$kit_mongoose" && CARGO_HOME="$kit_check/empty-cargo-home" CARGO_NET_OFFLINE=true \
+    cargo metadata --locked --offline --format-version 1 >/dev/null) \
+    || fail "packaged relink kit does not resolve offline from its vendored sources"
 grep -Eq '(^|/)LICEN[CS]E-LGPL-2\.1\.txt$' <<<"$libnfs_listing" || fail "libnfs source bundle omits LGPL 2.1 text"
 grep -Eq '(^|/)LICEN[CS]E-BSD\.txt$' <<<"$libnfs_listing" || fail "libnfs source bundle omits BSD text"
 grep -Eq '(^|/)COPYING$' <<<"$libnfs_listing" || fail "libnfs source bundle omits its license map"

@@ -40,6 +40,9 @@ Every distributed binary and package must meet all of these conditions:
    mongoose and nfs-walker source, locked/vendored dependencies, build inputs,
    and any object/archive material required by the relink procedure. Recipients
    must be able to modify libnfs and produce a working modified mongoose.
+   The relink kit's Cargo source map must send every locked dependency source
+   to its `vendor/` directory, so the kit builds offline from an empty Cargo
+   home; the release gate checks this on the packaged kit.
 4. **Reproducible instructions.** The relink kit records the Rust, Cargo,
    cargo-zigbuild, Zig, target, linker flags, libnfs configuration, source
    revisions, and commands used by that release.
@@ -52,7 +55,8 @@ Every distributed binary and package must meet all of these conditions:
    location. Keep those assets available for as long as the binary is offered.
 7. **Relink proof.** Before publication, a clean environment rebuilds a
    deliberately modified, interface-compatible libnfs, relinks mongoose with
-   it, runs the smoke suite, and records the result in the release evidence.
+   it offline from an empty, isolated Cargo home, runs the smoke suite, and
+   records the result in the release evidence.
 8. **Artifact consistency.** The bare binary, RPM, DEB, and tarball use the
    same digest-identified executable. Their notices, package license metadata,
    source pointers, and checksums describe that exact build.
