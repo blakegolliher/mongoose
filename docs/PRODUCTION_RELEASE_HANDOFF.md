@@ -607,6 +607,12 @@ Priority: **P1 / required before declaring production-ready**
 
 Suggested lead: human release owner with LLM implementation support.
 
+Implementation slice PR-11A (green workspace plus baseline pull-request CI)
+has a dedicated, Luna-sized handoff in
+`docs/PR_11A_CI_BASELINE_HANDOFF.md`. PR-11B dependency/advisory remediation,
+PR-11C release hardening/provenance, and protected real-NFS qualification
+remain separate follow-up work.
+
 ### Problem
 
 There is no checked-in CI or release workflow. The documented release process
