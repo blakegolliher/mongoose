@@ -28,12 +28,28 @@ using a libnfs stage sha256-verified against
 2.34 or newer and depend only on libc and libm.
 
 Build the reproducible `libnfs.a` from a clean checkout at the pinned revision,
-or point `LIBNFS_STAGE` at an already verified stage. The build uses path
-remapping so the archive digest does not depend on the checkout directory:
+or point `LIBNFS_STAGE` at an already verified stage:
 
 ```bash
 make libnfs-stage LIBNFS_SOURCE=/path/to/libnfs
 ```
+
+The build maps three absolute paths to fixed names: the libnfs checkout, its
+build directory, and Zig's `lib` directory, which holds the libc and compiler
+headers. The archive, debug info included, therefore does not depend on where
+the checkout or Zig lives. With the tool versions below, it must match
+`static_artifact_sha256` in `packaging/libnfs.lock.json` byte for byte.
+`make libnfs-stage`, `make release`, and CI all fail on any other digest. To
+repeat the two-path check, build twice with `ZIG` pointing at copies of the
+same Zig installed in two different directories, then `cmp` the two archives.
+
+Evidence (2026-09-29; Zig 0.16.0, CMake 3.28.3, GNU ar/ranlib 2.42): the
+pinned source was built with Zig at three absolute paths. These were the snap
+at `/snap/zig/16117`, and the official tarball, byte-identical to the snap, at
+two other directories. A shallow `git fetch` of the source in a separate
+directory was also built. All four archives were byte-identical, SHA-256
+`36822790290a78787cc4e8f029808d2eeef0bf62beb192bc49ec4e369ea666f0`. Before the
+Zig directory was mapped, the three Zig locations gave three different digests.
 
 The exact Rust, cargo-zigbuild, Zig, CMake, binutils, tar, gzip, and
 cargo-about versions used for releases are recorded in

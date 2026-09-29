@@ -4,7 +4,7 @@
   "source_git_sha": "6073b694784b95c39c3f1c3c563b2fff68bc9e13",
   "license": "LGPL-2.1-or-later",
   "release_linkage": "static",
-  "static_artifact_sha256": "b05f64216f80bca6a7e216b67c6b26078033283e53418044e8e9fd05d45ef192",
+  "static_artifact_sha256": "36822790290a78787cc4e8f029808d2eeef0bf62beb192bc49ec4e369ea666f0",
   "static_artifact_build": "scripts/build-libnfs-static.sh with Zig 0.16.0, CMake 3.28.3, GNU ar/ranlib 2.42",
   "target": "x86_64-unknown-linux-gnu.2.34"
 }

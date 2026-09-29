@@ -20,8 +20,10 @@ self-contained for Rust dependencies and can be built with Cargo offline.
 - CMake: `@CMAKE_VERSION@`
 - GNU ar/ranlib: `@BINUTILS_VERSION@`
 
-The official archive was built by `build-libnfs-static.sh`; its path-remapping
-flags make an unmodified `libnfs.a` reproducible across checkout directories.
+The official archive was built by `build-libnfs-static.sh`. Its path-remapping
+flags make an unmodified `libnfs.a` independent of both the checkout directory
+and the Zig install directory: rebuilding `libnfs/` with the tool versions
+above reproduces the official SHA-256 exactly.
 The mongoose release profile uses LTO, one codegen unit, `panic=abort`, and
 stripping, as recorded in `mongoose/Cargo.toml`.
 
