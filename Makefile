@@ -141,7 +141,12 @@ $(DIST):
 # Generate exact corresponding source, a vendored offline relink kit, license
 # notices, and evidence from an actual modified-libnfs relink. The generator
 # requires clean source trees at the pinned commits and fails before packaging.
+# The materials script runs cargo-about and cargo vendor offline, and both
+# need every crate in Cargo.lock, including other platforms' crates that a
+# Linux build never downloads. Fetch exactly the locked set first, so a
+# release also works from a cold Cargo cache.
 release-materials: binary
+	cargo fetch --locked
 	./scripts/build-lgpl-release-materials.sh \
 		--release-dir "$(DIST)" \
 		--version "$(VERSION)" \
