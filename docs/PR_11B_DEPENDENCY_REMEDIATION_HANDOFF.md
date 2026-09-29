@@ -1,8 +1,9 @@
 # PR-11B handoff — dependency and advisory remediation
 
-Status: **Phase 1 implemented** on branch `pr-11b-feature-boundaries`
-(2026-09-29), awaiting owner review of the design below. Phase 2 starts only
-after the owner approves it.
+Status: **Phase 1 merged** (mongoose PR #6, `e422bc0`, 2026-09-29), which
+approved its design. **Phase 2 implemented** on branch
+`pr-11b-dependency-updates` (2026-09-29), with the walker half in nfs-walker
+PR #11. See "Phase 2 (implemented)" below.
 
 Suggested implementers:
 
@@ -283,6 +284,72 @@ Results, measured locally with the CI-built libnfs archive:
    so a new advisory can turn an unrelated PR red. The response is to fix it
    or escalate to the owner, never to add an `ignore` without owner approval,
    a written reason, and a review date.
+
+## Phase 2 (implemented)
+
+Order of work: fixture first, then the walker, then mongoose.
+
+- **Parquet 54 fixture.** Before any upgrade, a 7 KB canonical shard was
+  written by the production `rewrite_shard` path with parquet 54.3.1 and
+  checked in as
+  `crates/migration-core/tests/fixtures/canonical-shard-parquet54.parquet`.
+  `tests/parquet54_fixture.rs` loads it with `ShardReader` and checks every
+  field of its three rows. It also pins the fixture's `created_by`, so a
+  regenerated fixture fails instead of silently testing nothing. It passed
+  under 54 before the upgrade and passes under 59.
+- **nfs-walker PR #11 (`44dc90b`).** `indicatif` 0.17→0.18, and
+  `arrow`/`parquet` 54→59.2 (locked at 59.2.0). This step was larger than
+  planned: the dashboard (`server` feature) passes DataFusion's
+  `RecordBatch` to the walker's arrow JSON writer, so DataFusion must share
+  arrow's version. DataFusion 55 is the only release on arrow 59. It needs
+  Rust 1.94, so the walker's Dockerfiles move to Rust 1.98.0. DataFusion 55
+  interpolates `approx_percentile_cont`, so two catalog queries cast back to
+  `BIGINT`. All 36 catalog queries return identical results on DataFusion 46
+  and 55 over the same scan. The PR also fixes a walker integration test
+  that had not compiled since `2dded4c`.
+- **mongoose.**
+  - The walker is pinned at `44dc90b`, with `packaging/nfs-walker.lock.json`
+    updated to match (`cf67c447…`). The recorded `cargo zigbuild` command
+    reproduced the old lock's digest (`7839e06a…`) for `2dded4c` on the same
+    host before the new digest was taken.
+  - The workspace moves to `arrow`/`parquet` 59.2.0. The only code change is
+    `parquet::format::KeyValue` → `parquet::file::metadata::KeyValue`.
+  - `rustls` goes to 0.23.45, which also moves `rustls-webpki` to 0.103.15,
+    `aws-lc-rs` to 1.18.1, and `aws-lc-sys` to 0.45.0.
+- **`deny.toml`.** It has the draft settings above plus
+  `[graph] targets` and `unmaintained = "all"`, and `ignore = []`. The allow
+  list is `about.toml`'s minus `LGPL-2.1-or-later`, which no crate uses.
+- **CI.** A separate `cargo-deny` job runs next to `baseline`, installing
+  cargo-deny 0.19.9 from the upstream tarball with its published SHA-256,
+  pinned in the workflow. It is pinned there rather than in
+  `release-toolchain.lock.json` because it is not a release build tool.
+  Branch protection must add `cargo-deny` as a required check.
+
+Results:
+
+- `cargo deny --locked check advisories licenses bans sources`:
+  advisories, bans, licenses, and sources all pass, with 15
+  duplicate-version warnings (24 at the start).
+- `cargo tree -p mongoose -e normal`: 160 unique crates (317 before
+  Phase 1, 169 after it). The acceptance `grep` prints nothing, and
+  mongoose links one Parquet implementation (59.2.0).
+- These all pass locally with the CI-built libnfs archive:
+  - `cargo fmt --all -- --check`;
+  - `cargo clippy --workspace --all-targets --locked -- -D warnings`;
+  - `cargo clippy -p mongoose --all-targets --locked -- -D warnings`;
+  - Clippy on `migration-core` with and without `--features s3`;
+  - Clippy on `migration-worker --no-default-features` for `--lib` and
+    `--all-targets`;
+  - `cargo test --workspace --locked` (735 passed, 0 failed, 28 ignored);
+  - `cargo test -p mongoose --locked` (124 passed);
+  - `cargo test -p migration-core` (69 passed) and with `--features s3`
+    (80 passed);
+  - `cargo test -p migration-worker --no-default-features --locked` (55
+    passed);
+  - ShellCheck and `make compliance-check`.
+- nfs-walker, same toolchain: Clippy with `-D warnings` for all features and
+  for `--no-default-features`; tests pass with the dashboard (86 passed) and
+  without it (76 passed).
 
 ## Acceptance
 

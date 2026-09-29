@@ -1,5 +1,6 @@
 # Baseline CI (PR-11A): formatting, Clippy, workspace tests, ShellCheck, and
-# the repository-level LGPL policy check.
+# the repository-level LGPL policy check. The cargo-deny job (PR-11B) checks
+# advisories, licenses, bans, and sources for the whole workspace.
 #
 # This workflow validates the checked-in workspace only. It never builds,
 # uploads, or publishes a release artifact.
@@ -130,3 +131,44 @@ jobs:
       - name: Disk usage
         if: always()
         run: df -h / "$RUNNER_TEMP"
+
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      # Change both together. The digest is the upstream release's published
+      # .sha256 for the x86_64-unknown-linux-musl tarball.
+      CARGO_DENY_VERSION: 0.19.9
+      CARGO_DENY_SHA256: f1f8eedc2a3ac297c540873f93785d4104b102c0079506b2a6b3221b7ec956af
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install locked Rust toolchain
+        run: |
+          rust=$(jq -r .rustc packaging/release-toolchain.lock.json)
+          rustup toolchain install "$rust" --profile minimal
+          rustup default "$rust"
+          [[ "$(rustc --version)" == "rustc $rust "* ]] || { echo "::error::rustc is not $rust"; exit 1; }
+
+      - name: Install pinned cargo-deny
+        run: |
+          name="cargo-deny-$CARGO_DENY_VERSION-x86_64-unknown-linux-musl"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$name.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/$CARGO_DENY_VERSION/$name.tar.gz"
+          echo "$CARGO_DENY_SHA256  $RUNNER_TEMP/$name.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+          install -m 0755 "$RUNNER_TEMP/$name/cargo-deny" "$HOME/.cargo/bin/cargo-deny"
+          test "$(cargo deny --version)" = "cargo-deny $CARGO_DENY_VERSION"
+
+      # A new advisory can turn this job red on an unrelated change. Fix or
+      # escalate it; see deny.toml before adding any ignore entry.
+      - name: cargo deny
+        run: cargo deny --locked check advisories licenses bans sources

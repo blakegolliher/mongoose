@@ -256,7 +256,7 @@ fn validate_schema(schema: &Arc<arrow::datatypes::Schema>) -> Result<()> {
 /// with no value (KV is `(String, Option<String>)` in the parquet
 /// thrift schema).
 fn collect_kv(
-    kv: Option<&Vec<parquet::format::KeyValue>>,
+    kv: Option<&Vec<parquet::file::metadata::KeyValue>>,
 ) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
     if let Some(v) = kv {
@@ -442,8 +442,8 @@ mod tests {
     };
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::ArrowWriter;
+    use parquet::file::metadata::KeyValue;
     use parquet::file::properties::WriterProperties;
-    use parquet::format::KeyValue;
     use std::sync::Arc;
 
     /// Builder for synthetic shards. Lets each test write the exact

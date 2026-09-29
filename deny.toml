@@ -1,0 +1,48 @@
+# cargo-deny policy for the whole workspace. CI runs:
+#
+#   cargo deny --locked check advisories licenses bans sources
+#
+# The advisory database changes independently of this repository, so a new
+# advisory can turn an unrelated pull request red. Fix it by updating or
+# removing the dependency, or escalate to the owner. An advisory `ignore`
+# entry needs owner approval, a written reason, and a review date.
+
+[graph]
+# Match about.toml: mongoose ships for x86_64 Linux only.
+targets = ["x86_64-unknown-linux-gnu"]
+
+[advisories]
+# Unmaintained crates fail the check wherever they appear in the graph, not
+# only as direct dependencies.
+unmaintained = "all"
+ignore = []
+
+[licenses]
+# about.toml's `accepted` list, minus licenses no crate in the graph uses.
+# cargo-deny warns when an entry here becomes unused; drop it then.
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# The internal crates are versionless path dependencies. They are all
+# `publish = false`, which this setting requires.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = ["https://github.com/blakegolliher/nfs-walker"]

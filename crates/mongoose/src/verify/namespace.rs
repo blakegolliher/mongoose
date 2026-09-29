@@ -509,8 +509,8 @@ pub(crate) mod tests {
     use arrow::record_batch::RecordBatch;
     use migration_core::schema::{self, make_row_id};
     use parquet::arrow::ArrowWriter;
+    use parquet::file::metadata::KeyValue;
     use parquet::file::properties::WriterProperties;
-    use parquet::format::KeyValue;
     use std::sync::Arc;
 
     pub(crate) fn entry(path: &[u8], file_type: FileTypeTag, size: u64) -> Entry {
