@@ -32,12 +32,10 @@ and hardware qualification remain separate gates.
 
 ## Owner prerequisites
 
-- **nfs-walker PR #10.** mongoose pins nfs-walker commit `2dded4c`, which
-  currently exists only on the `embed-libnfs-override` branch of open PR #10.
-  Merge PR #10 with a regular merge commit (not squash or rebase) before
-  deleting that branch, so the pinned commit stays permanently reachable.
-  Otherwise the pin in `crates/mongoose/Cargo.toml` and
-  `packaging/nfs-walker.lock.json` must be updated.
+- **nfs-walker PR #10: done.** It was merged on 2026-09-29 with a regular
+  merge commit (`f37cf92`), so the pinned walker commit `2dded4c` is
+  permanently reachable from walker `main`. The `embed-libnfs-override`
+  branch can be deleted.
 - **Branch protection is not an implementation blocker.** Land a green
   workflow first; the owner then marks the resulting check required on `main`.
 
