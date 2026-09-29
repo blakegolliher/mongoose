@@ -613,6 +613,17 @@ has a dedicated, Luna-sized handoff in
 PR-11C release hardening/provenance, and protected real-NFS qualification
 remain separate follow-up work.
 
+Recorded for PR-11C (2026-09-29): the locked `libnfs.a` digest is not
+independent of Zig's installation path. Rebuilding the locked source with the
+locked tool versions in a clean `ubuntu:24.04` container, but with Zig at a
+different path, produced a different SHA-256. The machine code was identical;
+the Zig path (`/snap/zig/<revision>/lib/...`) leaks into debug metadata. PR-11C
+must make the archive build independent of that path, re-pin through the normal
+LGPL review, and only then let CI enforce the digest. Until then, `make release`
+keeps enforcing the locked digest in its locked release environment, and
+PR-11A CI builds a disposable, unpinned archive from the same source for tests
+only.
+
 ### Problem
 
 There is no checked-in CI or release workflow. The documented release process
