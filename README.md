@@ -21,8 +21,10 @@ The release page also has an `.rpm` and a `.deb` if you prefer a
 package (they add a man page).
 
 Needs Linux x86_64 with glibc 2.34 or newer: RHEL/Rocky/Alma 9+,
-Ubuntu 22.04+, Debian 12+, SLES 15 SP4+. Run it as root: it needs
-reserved ports to talk to the NFS servers.
+Ubuntu 22.04+, Debian 12+, SLES 15 SP4+. The CPU must support AES-NI
+(every mainstream x86-64 server CPU since about 2010); mongoose refuses
+to start without it. Run it as root: it needs reserved ports to talk to
+the NFS servers.
 
 ## Use
 

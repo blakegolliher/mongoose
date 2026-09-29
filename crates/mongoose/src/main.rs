@@ -26,6 +26,17 @@ fn exit_code_for(outcome: ExitOutcome) -> ExitCode {
 }
 
 fn main() -> ExitCode {
+    // The embedded walker routes paths with gxhash, which is compiled for
+    // AES-NI and has no fallback: without it the first scan would die of
+    // SIGILL. Refuse before doing anything else.
+    #[cfg(target_arch = "x86_64")]
+    if !std::arch::is_x86_feature_detected!("aes") || !std::arch::is_x86_feature_detected!("sse2") {
+        eprintln!(
+            "error: mongoose needs an x86-64 CPU with AES-NI, and this CPU does not report it"
+        );
+        return exit_code_for(ExitOutcome::Fatal);
+    }
+
     // Default the full reserved-port range on (libnfs checks only the
     // variable's *presence*): without it, /etc/services name
     // registrations throttle a host to ~55 context pairs, and every
