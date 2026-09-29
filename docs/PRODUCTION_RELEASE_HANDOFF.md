@@ -607,6 +607,41 @@ Priority: **P1 / required before declaring production-ready**
 
 Suggested lead: human release owner with LLM implementation support.
 
+Implementation slice PR-11A (green workspace plus baseline pull-request CI)
+has a dedicated, Luna-sized handoff in
+`docs/PR_11A_CI_BASELINE_HANDOFF.md`. PR-11B dependency/advisory remediation,
+PR-11C release hardening/provenance, and protected real-NFS qualification
+remain separate follow-up work.
+
+Status (2026-09-29): PR-11A implemented in PR #2 (commit `820a3e6`).
+`examples/worker.toml` now exists, so the missing-example workspace-test
+failure is closed. `.github/workflows/ci.yml` runs on every pull request and
+push to `main` using the locked Rust/Cargo 1.98.0. It builds a disposable
+static libnfs from the locked fork commit with Zig 0.16.0 (the tarball is
+checked against a pinned SHA-256), links every Cargo gate against it through
+`VAMOOSE_LIBNFS_DIR`/`NFS_WALKER_LIBNFS_DIR`, and refuses to run if a system
+libnfs is present. Enforced gates:
+`cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets --locked -- -D warnings`,
+`cargo test --workspace --locked`,
+`shellcheck scripts/*.sh packaging/relink-kit/*.sh`, and
+`make compliance-check`. The first hosted run (run 36512506534) passed from a
+cold runner with 732 tests passed, 0 failed, and 28 ignored. Throwaway PRs
+#3 (fixture removed) and #4 (ShellCheck finding) failed at the `cargo test`
+and `shellcheck` gates as intended. PR-11B, PR-11C, and real-NFS hardware
+qualification remain release blockers.
+
+Recorded for PR-11C (2026-09-29): the locked `libnfs.a` digest is not
+independent of Zig's installation path. Rebuilding the locked source with the
+locked tool versions in a clean `ubuntu:24.04` container, but with Zig at a
+different path, produced a different SHA-256. The machine code was identical;
+the Zig path (`/snap/zig/<revision>/lib/...`) leaks into debug metadata. PR-11C
+must make the archive build independent of that path, re-pin through the normal
+LGPL review, and only then let CI enforce the digest. Until then, `make release`
+keeps enforcing the locked digest in its locked release environment, and
+PR-11A CI builds a disposable, unpinned archive from the same source for tests
+only.
+
 ### Problem
 
 There is no checked-in CI or release workflow. The documented release process
