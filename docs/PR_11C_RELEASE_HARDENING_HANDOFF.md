@@ -5,8 +5,8 @@ Status (2026-09-29):
 - **11C-1, libnfs archive reproducibility:** merged in PR #10 (`2e7e712`).
 - **11C-2, release gate hardening:** implemented on branch
   `pr-11c-release-gates`.
-- **11C-3, SBOM, signed checksums, and provenance:** waiting on the owner
-  decisions below.
+- **11C-3, SBOM, signed checksums, and provenance:** decided (GitHub
+  Actions with Sigstore, and a CycloneDX SBOM); next after 11C-2 merges.
 - **11C-4, real-NFS qualification and the release record:** waiting on the
   owner decisions below.
 
@@ -71,14 +71,20 @@ Acceptance for 11C-2:
 - the artifact gate fails against a binary built without the AES-NI check;
 - hosted CI is green.
 
-## 11C-3 — SBOM, signed checksums, and provenance (owner decisions)
+## 11C-3 — SBOM, signed checksums, and provenance (decided)
 
 Maps to PR-11 required outcome 7, and to "publishes checksums/provenance only
 after every software and hardware gate succeeds". Today, the only integrity
 record is an unsigned `SHA256SUMS`, served from the same place as the
 artifacts.
 
-Decisions needed:
+Owner decisions (2026-09-29):
+
+- **Build and sign in a GitHub Actions release workflow with Sigstore.** The
+  alternative, an owner-held key on the release host, is rejected.
+- **Ship a CycloneDX JSON SBOM.**
+
+The options that were weighed:
 
 1. **Where release artifacts are built and signed.**
    - **Recommended: a GitHub Actions release workflow**, dispatched on a tag.
