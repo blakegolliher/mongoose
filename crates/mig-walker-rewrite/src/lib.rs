@@ -24,8 +24,8 @@ use migration_core::schema::{
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
+use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
-use parquet::format::KeyValue;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};

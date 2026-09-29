@@ -39,8 +39,8 @@ aws-config   = "1"
 aws-smithy-types-convert = { version = "0.60", features = ["convert-chrono"] }
 
 # Parquet / Arrow (match nfs-walker's version family)
-arrow   = { version = "54", default-features = false, features = ["ipc"] }
-parquet = { version = "54", default-features = false, features = ["arrow", "zstd"] }
+arrow   = { version = "59.2", default-features = false, features = ["ipc"] }
+parquet = { version = "59.2", default-features = false, features = ["arrow", "zstd"] }
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "fs", "sync", "time", "io-util", "net"] }

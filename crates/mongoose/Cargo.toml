@@ -28,12 +28,12 @@ parquet            = { workspace = true }
 base64             = { workspace = true }
 
 # The scanner, compiled in so mongoose ships as one binary. Pinned to
-# branch embed-libnfs-override at the commit
-# packaging/nfs-walker.lock.json records; bump the lock and this rev
+# a commit on walker main, the one packaging/nfs-walker.lock.json
+# records; bump the lock and this rev
 # together (docs/PRODUCTION_RELEASE_HANDOFF.md, PR-01/PR-02).
 # default-features = false drops the optional analytics dashboard
 # (datafusion/axum/rust-embed) — mongoose only needs the walk engine.
-nfs-walker = { git = "https://github.com/blakegolliher/nfs-walker", rev = "2dded4cf2c5a3c593b9a850ca69a404d70c46336", default-features = false }
+nfs-walker = { git = "https://github.com/blakegolliher/nfs-walker", rev = "44dc90b932f80dc565a5bfd30d8a3d28895eff18", default-features = false }
 
 tokio              = { workspace = true }
 tokio-util         = { workspace = true }
