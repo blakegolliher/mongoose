@@ -120,11 +120,15 @@ versions avoid shipping two Parquet implementations.
 
 Approved 2026-09-29:
 
-1. **Remove the insecure execution mode.** Keep parsing `verify_tls` for
-   configuration compatibility, but reject `false` with a clear startup error.
-   Do not rebuild an insecure, lab-only S3 path on the current TLS stack. The
-   hyper-0.14 and rustls-0.21 stack leaves the workspace, and no advisory is
-   ignored.
+1. **Remove only the insecure S3 execution mode.** This decision applies to
+   `[run].verify_tls`, which configures the S3 client and is the sole reason for
+   the legacy hyper-0.14/rustls-0.21 stack. Keep parsing that key for
+   configuration compatibility, but reject `false` with a clear startup error
+   when the S3 client is initialized. Do not rebuild the insecure, lab-only S3
+   path on the current TLS stack. The hyper-0.14 and rustls-0.21 stack leaves
+   the workspace, and no advisory is ignored. This decision does **not** apply
+   to `[coord].verify_tls`; the coordinator client already uses the current
+   reqwest/rustls stack, and its existing insecure lab mode remains unchanged.
 2. **Audit the whole workspace.** `cargo deny` checks every workspace member,
    not only the mongoose graph, with no `ignore` entries. Known-vulnerable code
    in another checked-in binary is still a repository failure.
@@ -150,6 +154,18 @@ then the structural changes:
   itself can stay ungated.
 - Apply owner decision 1, and remove `hyper-014`, `legacy-rustls-ring`,
   `hyper-rustls` 0.24, and `rustls` 0.21 from the workspace.
+- Preserve the distinction between the two similarly named configuration
+  keys. `config::tests::run_cfg_picks_up_profile_and_verify_tls` must continue
+  proving that `[run].verify_tls = false` parses; rejection happens later at
+  S3-client startup. Existing coordinator tests that set
+  `[coord].verify_tls = false`, including `coord_driver_integration.rs` and
+  `phase3_acceptance.rs`, must keep passing unchanged.
+- Update the ignored live-S3 fixture in
+  `crates/migration-coord/tests/var204_smoke.rs` so
+  `VAMOOSE_TEST_S3_VERIFY_TLS` defaults to verified TLS. An explicit false
+  value may still parse, but must encounter the same clear startup rejection
+  as any other `[run]` configuration. This fixes the test setup; do not skip or
+  weaken the test.
 - Keep `cargo test --workspace --locked` building and running every engine
   test. Do not add ignores, package exclusions, or filters.
 
