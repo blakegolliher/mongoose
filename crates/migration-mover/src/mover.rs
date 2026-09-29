@@ -740,7 +740,7 @@ impl Mover {
 
     /// Borrow the downgrade sink. Used by the orchestrator to drain
     /// JSONL between shards and to update the current shard name, and
-    /// by the processor to record FsidUngrouped fallbacks.
+    /// by the processor to record FsidUngrouped safety downgrades.
     pub fn downgrade_sink(&self) -> &DowngradeSink {
         &self.downgrades
     }

@@ -686,6 +686,7 @@ fn translate_batch(
     let walker_atime_sec = opt_int64_optional_col(input, "atime_sec");
     let walker_atime_nsec = opt_int32_optional_col(input, "atime_nsec");
     let walker_inode = req_u64(input, "inode")?;
+    let walker_fsid = opt_u64_optional_col(input, "fsid")?;
     let walker_nlink = req_u32(input, "nlink")?;
     let walker_uid = req_u32(input, "uid")?;
     let walker_gid = req_u32(input, "gid")?;
@@ -762,10 +763,12 @@ fn translate_batch(
             },
         }
 
-        // Walker doesn't capture fsid, symlink_target, or xattr_blob.
-        // Mover handles null fsid with a one-time WARN; missing
-        // symlink_target falls back to nfs_readlink at the destination.
-        fsid_b.append_null();
+        match walker_fsid {
+            Some(array) if !array.is_null(i) => fsid_b.append_value(array.value(i)),
+            _ => fsid_b.append_null(),
+        }
+        // Walker does not yet capture symlink_target or xattr_blob.
+        // Missing symlink_target falls back to nfs_readlink at the destination.
         symt_b.append_null();
         xattr_b.append_null();
     }
@@ -848,7 +851,7 @@ fn translate_batch(
             "path" => "path_legacy",
             "file_type" => "file_type_mime",
             // Already covered by canonical columns of the same name.
-            "size" | "uid" | "gid" | "nlink" | "inode" | "mtime_sec" | "mtime_nsec"
+            "size" | "uid" | "gid" | "nlink" | "inode" | "fsid" | "mtime_sec" | "mtime_nsec"
             | "atime_sec" | "atime_nsec" => continue,
             other => other,
         };
@@ -1026,6 +1029,18 @@ fn req_u64<'a>(b: &'a RecordBatch, name: &str) -> Result<&'a UInt64Array> {
         .ok_or_else(|| anyhow!("walker shard missing required column `{name}`"))?;
     arr.as_any()
         .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| anyhow!("walker column `{name}` is not UInt64"))
+}
+
+/// Optional UInt64 column. Absence supports legacy walker shards; when the
+/// column exists its type is part of the input contract and must be valid.
+fn opt_u64_optional_col<'a>(b: &'a RecordBatch, name: &str) -> Result<Option<&'a UInt64Array>> {
+    let Some(arr) = b.column_by_name(name) else {
+        return Ok(None);
+    };
+    arr.as_any()
+        .downcast_ref::<UInt64Array>()
+        .map(Some)
         .ok_or_else(|| anyhow!("walker column `{name}` is not UInt64"))
 }
 
@@ -1492,9 +1507,9 @@ mod tests {
         assert_eq!(rows[1].row_id & ((1 << 40) - 1), 1);
         assert_eq!(rows[2].row_id & ((1 << 40) - 1), 2);
 
-        // fsid/symlink_target/xattr_blob are nulled by the shim — the
-        // mover handles each gracefully (WARN, readlink fallback,
-        // null-safe respectively). See SHIM_PLAN.md.
+        // This legacy walker shape has no fsid, symlink_target, or xattr_blob;
+        // the shim keeps all three null. New walker shards exercise fsid
+        // passthrough separately below.
         for r in &rows {
             assert_eq!(r.fsid, None);
             assert_eq!(r.xattr_blob, None);
@@ -1715,6 +1730,50 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("walker column `path_bytes` is not Binary"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn fsid_is_preserved_when_walker_provides_it() {
+        let batch = append_column(
+            &synthetic_walker_batch("/src-test"),
+            "fsid",
+            Arc::new(UInt64Array::from(vec![Some(7), None, Some(9)])),
+        );
+
+        let translated = translate_batch(&batch, 0, 0, b"/src-test").unwrap();
+        let fsids = translated
+            .column_by_name(schema::COL_FSID)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(fsids.value(0), 7);
+        assert!(fsids.is_null(1));
+        assert_eq!(fsids.value(2), 9);
+        assert_eq!(
+            translated
+                .schema()
+                .fields()
+                .iter()
+                .filter(|field| field.name() == schema::COL_FSID)
+                .count(),
+            1,
+        );
+    }
+
+    #[test]
+    fn fsid_wrong_type_is_rejected_instead_of_treated_as_absent() {
+        let batch = append_column(
+            &synthetic_walker_batch("/src-test"),
+            "fsid",
+            Arc::new(StringArray::from(vec!["7", "8", "9"])),
+        );
+        let err = translate_batch(&batch, 0, 0, b"/src-test").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("walker column `fsid` is not UInt64"),
             "{err:#}"
         );
     }

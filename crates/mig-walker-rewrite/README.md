@@ -73,13 +73,12 @@ For M2/M3 manual verification with the curated test tree (regular
 files, directories, symlinks only), this is fine. For migrating
 production data, **operators must wait for native walker support**.
 
-In addition, the shim emits `fsid`, `symlink_target`, and `xattr_blob`
-as null on every row, because walker does not capture them. The mover
-handles each gracefully: `fsid = null` issues a one-time WARN and
-falls back to grouping hardlinks by `inode` alone; `symlink_target =
-null` triggers a `READLINK` round-trip during the symlink copy;
-`xattr_blob = null` is the contract default and means xattrs are not
-preserved.
+The shim carries the walker's nullable `fsid` into canonical output. Older
+walker shards without that column remain readable with `fsid = null`; the
+mover copies their affected hardlink entries independently rather than risk
+grouping equal inode numbers from different filesystems. `symlink_target` and
+`xattr_blob` remain null: the former triggers a `READLINK` round-trip during
+copy, while the latter means xattrs are not preserved.
 
 ## Sunset
 
