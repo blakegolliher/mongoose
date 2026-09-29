@@ -50,12 +50,22 @@ command -v cmake >/dev/null 2>&1 || fail "cmake is required"
 command -v ar >/dev/null 2>&1 || fail "GNU ar is required"
 command -v ranlib >/dev/null 2>&1 || fail "GNU ranlib is required"
 
+# The libc and compiler headers come from Zig's lib directory, and their
+# absolute paths land in the archive's debug info. Map it to a fixed name so
+# the archive does not depend on where Zig is installed.
+zig_lib_dir=$("$zig_bin" env 2>/dev/null | sed -n 's/^ *\.lib_dir = "\(.*\)",$/\1/p')
+test -n "$zig_lib_dir" || fail "cannot read Zig's lib directory from '$zig_bin env'"
+test -d "$zig_lib_dir" || fail "Zig's lib directory is missing: $zig_lib_dir"
+
 build_root=$(mktemp -d "${TMPDIR:-/tmp}/mongoose-libnfs-build.XXXXXX")
 cleanup() {
     rm -rf -- "$build_root"
 }
 trap cleanup EXIT
 build_dir="$build_root/build"
+case "$source_dir$build_dir$zig_lib_dir" in
+    *[[:space:]]*) fail "source, build, and Zig lib paths must not contain whitespace" ;;
+esac
 
 c_flags="-target x86_64-linux-gnu.2.34"
 c_flags+=" -ffile-prefix-map=$source_dir=/usr/src/libnfs"
@@ -64,6 +74,8 @@ c_flags+=" -fmacro-prefix-map=$source_dir=/usr/src/libnfs"
 c_flags+=" -ffile-prefix-map=$build_dir=/usr/src/libnfs-build"
 c_flags+=" -fdebug-prefix-map=$build_dir=/usr/src/libnfs-build"
 c_flags+=" -fdebug-compilation-dir=/usr/src/libnfs-build"
+c_flags+=" -ffile-prefix-map=$zig_lib_dir=/usr/lib/zig"
+c_flags+=" -fdebug-prefix-map=$zig_lib_dir=/usr/lib/zig"
 
 export ZIG_GLOBAL_CACHE_DIR="$build_root/zig-global-cache"
 export ZIG_LOCAL_CACHE_DIR="$build_root/zig-local-cache"

@@ -5,11 +5,12 @@
 # This workflow validates the checked-in workspace only. It never builds,
 # uploads, or publishes a release artifact.
 #
-# Every Cargo gate links a disposable static libnfs archive built from the
-# fork commit pinned in packaging/libnfs.lock.json; the distro libnfs-dev
-# lacks symbols mongoose needs. That archive's digest varies with Zig's
-# install path, so it is not compared with the locked release digest.
-# `make release` keeps enforcing the locked digest and the full LGPL gate.
+# Every Cargo gate links a static libnfs archive built from the fork commit
+# pinned in packaging/libnfs.lock.json; the distro libnfs-dev lacks symbols
+# mongoose needs. The build maps the source, build, and Zig paths to fixed
+# names, so the archive must match the locked release digest byte for byte
+# even though Zig is installed at a different path here. `make release`
+# enforces the same digest and the full LGPL gate.
 name: CI
 
 on:
@@ -95,7 +96,7 @@ jobs:
           test "$("$RUNNER_TEMP/zig/zig" version)" = "$zig_version"
           echo "Zig $zig_version"
 
-      - name: Build pinned libnfs (CI-only archive)
+      - name: Build pinned libnfs and check its locked digest
         run: |
           url=$(jq -r .source_url packaging/libnfs.lock.json)
           sha=$(jq -r .source_git_sha packaging/libnfs.lock.json)
@@ -104,7 +105,7 @@ jobs:
           git -C "$RUNNER_TEMP/libnfs" checkout -q FETCH_HEAD
           test "$(git -C "$RUNNER_TEMP/libnfs" rev-parse HEAD)" = "$sha"
           echo "libnfs $url @ $sha"
-          # Deliberately no EXPECTED_LIBNFS_SHA256: see the header comment.
+          EXPECTED_LIBNFS_SHA256="$(jq -er .static_artifact_sha256 packaging/libnfs.lock.json)" \
           EXPECTED_ZIG_VERSION="$(jq -r .zig packaging/release-toolchain.lock.json)" \
           ZIG="$RUNNER_TEMP/zig/zig" \
           ./scripts/build-libnfs-static.sh \
