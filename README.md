@@ -20,6 +20,23 @@ sudo mv mongoose-linux-x86_64 /usr/local/bin/mongoose
 The release page also has an `.rpm` and a `.deb` if you prefer a
 package (they add a man page).
 
+Releases built by the release workflow are signed and attested. You can
+check a download before installing it. With `cosign` and the `gh` CLI
+installed, and `mongoose-linux-x86_64`, `SHA256SUMS`, and
+`SHA256SUMS.sigstore.json` downloaded from the same release:
+
+```bash
+tag=vX.Y.Z   # the release you downloaded
+cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity "https://github.com/blakegolliher/mongoose/.github/workflows/release.yml@refs/tags/$tag" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+sha256sum --check --ignore-missing SHA256SUMS
+gh attestation verify mongoose-linux-x86_64 --repo blakegolliher/mongoose
+```
+
+[docs/BUILDING.md](docs/BUILDING.md#verifying-a-release) has the full
+procedure.
+
 Needs Linux x86_64 with glibc 2.34 or newer: RHEL/Rocky/Alma 9+,
 Ubuntu 22.04+, Debian 12+, SLES 15 SP4+. The CPU must support AES-NI
 (every mainstream x86-64 server CPU since about 2010); mongoose refuses

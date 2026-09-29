@@ -1,0 +1,443 @@
+# Release pipeline (PR-11C slice 3). Build once, then carry the exact gated
+# bytes through signing, attestation, and publication:
+#
+#   build    make release: every artifact, then the CycloneDX SBOM, then
+#            SHA256SUMS over all of them, then the LGPL and artifact gates.
+#            Freeze the files SHA256SUMS lists, prove the checks reject
+#            tampered copies of them, and hand them on by digest.
+#   handoff  Re-verify the frozen set after the artifact transfer. Runs in
+#            every mode, so a dry run proves the hand-off too.
+#   sign     Tags only: attest every file (build provenance, plus the SBOM for
+#            the binary) and sign SHA256SUMS with Sigstore (cosign, keyless).
+#   verify   Tags only: on a fresh runner, run scripts/verify-release.sh, the
+#            documented clean-machine verification.
+#   publish  Tags only, behind the protected `release` environment: upload
+#            exactly the frozen files plus the signature bundle.
+#
+# Pushing a tag vX.Y.Z releases, and only when the tag, the Cargo version, and
+# the commit agree, the commit is on main, and no release exists for the tag.
+# A manual run (workflow_dispatch) and a pull request touching the release
+# machinery are dry runs: build, gate, freeze, and hand-off, with read-only
+# permissions. They never sign, attest, or publish. Every job after build
+# re-checks the frozen set against the SHA256SUMS digest the build job
+# recorded; nothing is rebuilt or regenerated after the gates.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - Makefile
+      - scripts/**
+      - packaging/**
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Change a version and its digest together. The digests match each project's
+  # published checksums and GitHub's release-asset digests.
+  COSIGN_VERSION: v3.1.3
+  COSIGN_SHA256: 4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71
+  CYCLONEDX_CLI_SHA256: bfc8b2538da86fe239bc53658bbb63c1c8c510a293c1e6891aa5bea5d3c58746
+
+jobs:
+  build:
+    name: build and gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+    outputs:
+      publishable: ${{ steps.mode.outputs.publishable }}
+      tag: ${{ steps.mode.outputs.tag }}
+      version: ${{ steps.mode.outputs.version }}
+      sums_sha256: ${{ steps.freeze.outputs.sums_sha256 }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          df -h /
+
+      - name: Install system tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends jq rpm cmake
+          # The runner's /usr/local/bin/cmake is newer than the locked 3.28.3;
+          # put Ubuntu's first on PATH.
+          mkdir -p "$RUNNER_TEMP/bin"
+          ln -sf /usr/bin/cmake "$RUNNER_TEMP/bin/cmake"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          podman --version
+
+      - name: Refuse a system libnfs
+        run: |
+          if dpkg-query -W -f='${Status}' libnfs-dev 2>/dev/null | grep -q 'install ok installed'; then
+            echo "::error::libnfs-dev is installed; releases must link the pinned libnfs fork"
+            exit 1
+          fi
+
+      - name: Install locked Rust toolchain
+        run: |
+          rust=$(jq -er .rustc packaging/release-toolchain.lock.json)
+          rustup toolchain install "$rust" --profile minimal
+          rustup default "$rust"
+
+      - name: Decide release or dry run
+        id: mode
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 --offline \
+            | jq -er '.packages[] | select(.name == "mongoose") | .version')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$EVENT" == push && "$REF_TYPE" == tag ]]; then
+            ./scripts/check-release-ref.sh --tag "$REF_NAME" --commit "$GITHUB_SHA" --main origin/main
+            if gh release view "$REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "::error::a release already exists for $REF_NAME; published tags are never released again"
+              exit 1
+            fi
+            echo "tag=$REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "publishable=true" >> "$GITHUB_OUTPUT"
+            echo "Release $REF_NAME (mongoose $version)"
+          else
+            echo "publishable=false" >> "$GITHUB_OUTPUT"
+            echo "Dry run ($EVENT on $REF_NAME): build, gate, freeze, and hand off only"
+          fi
+
+      - name: Install locked Cargo tools
+        run: |
+          lock=packaging/release-toolchain.lock.json
+          cargo install --locked cargo-zigbuild --version "$(jq -er .cargo_zigbuild "$lock")"
+          cargo install --locked cargo-about --version "$(jq -er .cargo_about "$lock")"
+          cargo install --locked cargo-cyclonedx --version "$(jq -er .cargo_cyclonedx "$lock")"
+
+      - name: Install locked cyclonedx-cli
+        run: |
+          version=$(jq -er .cyclonedx_cli packaging/release-toolchain.lock.json)
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/bin/cyclonedx" \
+            "https://github.com/CycloneDX/cyclonedx-cli/releases/download/v$version/cyclonedx-linux-x64"
+          echo "$CYCLONEDX_CLI_SHA256  $RUNNER_TEMP/bin/cyclonedx" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/cyclonedx"
+
+      - name: Install locked Zig
+        run: |
+          zig_version=$(jq -er .zig packaging/release-toolchain.lock.json)
+          case "$zig_version" in
+            0.16.0) zig_sha256=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00 ;;
+            *) echo "::error::no pinned tarball digest for Zig $zig_version"; exit 1 ;;
+          esac
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/zig.tar.xz" \
+            "https://ziglang.org/download/$zig_version/zig-x86_64-linux-$zig_version.tar.xz"
+          echo "$zig_sha256  $RUNNER_TEMP/zig.tar.xz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "ZIG=$RUNNER_TEMP/zig/zig" >> "$GITHUB_ENV"
+
+      - name: Fetch the pinned libnfs and nfs-walker sources
+        run: |
+          fetch() {
+            local dir="$1" url="$2" sha="$3"
+            git init -q "$dir"
+            git -C "$dir" fetch -q --depth 1 "$url" "$sha"
+            git -C "$dir" checkout -q FETCH_HEAD
+            test "$(git -C "$dir" rev-parse HEAD)" = "$sha"
+            echo "$url @ $sha"
+          }
+          fetch "$RUNNER_TEMP/libnfs" "$(jq -er .source_url packaging/libnfs.lock.json)" \
+            "$(jq -er .source_git_sha packaging/libnfs.lock.json)"
+          fetch "$RUNNER_TEMP/nfs-walker" "$(jq -er .source_url packaging/nfs-walker.lock.json)" \
+            "$(jq -er .source_git_sha packaging/nfs-walker.lock.json)"
+
+      - name: Check the toolchain against its lock
+        run: make toolchain-check
+
+      - name: Build the pinned libnfs stage
+        run: make libnfs-stage LIBNFS_SOURCE="$RUNNER_TEMP/libnfs"
+
+      - name: make release (artifacts, SBOM, SHA256SUMS, LGPL and artifact gates)
+        run: |
+          make release DIST=dist \
+            LIBNFS_SOURCE="$RUNNER_TEMP/libnfs" NFS_WALKER_SOURCE="$RUNNER_TEMP/nfs-walker"
+
+      - name: Freeze the gated artifact set
+        id: freeze
+        run: |
+          mkdir "$RUNNER_TEMP/release-set"
+          sed -E 's/^[0-9a-f]{64}  //' dist/SHA256SUMS | while IFS= read -r file; do
+            cp -p "dist/$file" "$RUNNER_TEMP/release-set/"
+          done
+          cp -p dist/SHA256SUMS "$RUNNER_TEMP/release-set/"
+          sums_sha256=$(sha256sum "$RUNNER_TEMP/release-set/SHA256SUMS" | cut -d' ' -f1)
+          ./scripts/check-release-set.sh --dir "$RUNNER_TEMP/release-set" --sums-sha256 "$sums_sha256"
+          echo "sums_sha256=$sums_sha256" >> "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/release-set/SHA256SUMS"
+
+      - name: Self-test the gates on this release's artifacts
+        env:
+          VERSION: ${{ steps.mode.outputs.version }}
+        run: ./scripts/test-release-gates.sh --set "$RUNNER_TEMP/release-set" --version "$VERSION"
+
+      - name: Upload the frozen set
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-set
+          path: ${{ runner.temp }}/release-set/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Disk usage
+        if: always()
+        run: df -h /
+
+  handoff:
+    name: verify the hand-off
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the set check
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/check-release-set.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Download the frozen set
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-set
+          path: ${{ runner.temp }}/release-set
+          digest-mismatch: error
+
+      - name: Check it against the build job's digest
+        env:
+          SUMS_SHA256: ${{ needs.build.outputs.sums_sha256 }}
+        run: ./scripts/check-release-set.sh --dir "$RUNNER_TEMP/release-set" --sums-sha256 "$SUMS_SHA256"
+
+  sign:
+    name: attest and sign
+    needs: build
+    if: github.event_name == 'push' && github.ref_type == 'tag' && needs.build.outputs.publishable == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the set check
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/check-release-set.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Download the frozen set
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-set
+          path: ${{ runner.temp }}/release-set
+          digest-mismatch: error
+
+      - name: Check it against the build job's digest
+        env:
+          SUMS_SHA256: ${{ needs.build.outputs.sums_sha256 }}
+        run: ./scripts/check-release-set.sh --dir "$RUNNER_TEMP/release-set" --sums-sha256 "$SUMS_SHA256"
+
+      - name: Attest build provenance for every listed artifact
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: ${{ runner.temp }}/release-set/SHA256SUMS
+          create-storage-record: false
+
+      - name: Attest build provenance for SHA256SUMS
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/release-set/SHA256SUMS
+          create-storage-record: false
+
+      - name: Attest the SBOM for the binary
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: ${{ runner.temp }}/release-set/mongoose-linux-x86_64
+          sbom-path: ${{ runner.temp }}/release-set/mongoose-${{ needs.build.outputs.version }}-sbom.cdx.json
+
+      - name: Install locked cosign
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/bin/cosign" \
+            "https://github.com/sigstore/cosign/releases/download/$COSIGN_VERSION/cosign-linux-amd64"
+          echo "$COSIGN_SHA256  $RUNNER_TEMP/bin/cosign" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/cosign"
+
+      - name: Sign SHA256SUMS
+        env:
+          SUMS_SHA256: ${{ needs.build.outputs.sums_sha256 }}
+        run: |
+          mkdir "$RUNNER_TEMP/signature"
+          "$RUNNER_TEMP/bin/cosign" sign-blob --yes \
+            --bundle "$RUNNER_TEMP/signature/SHA256SUMS.sigstore.json" \
+            "$RUNNER_TEMP/release-set/SHA256SUMS"
+          ./scripts/check-release-set.sh --dir "$RUNNER_TEMP/release-set" --sums-sha256 "$SUMS_SHA256"
+
+      - name: Upload the signature bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signature
+          path: ${{ runner.temp }}/signature/
+          if-no-files-found: error
+          retention-days: 30
+
+  verify:
+    name: verify from a clean machine
+    needs: [build, sign]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      attestations: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the verification scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/check-release-set.sh
+            scripts/verify-release.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Download the frozen set
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-set
+          path: ${{ runner.temp }}/download
+          digest-mismatch: error
+
+      - name: Download the signature bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signature
+          path: ${{ runner.temp }}/download
+          digest-mismatch: error
+
+      - name: Install locked cosign
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/bin/cosign" \
+            "https://github.com/sigstore/cosign/releases/download/$COSIGN_VERSION/cosign-linux-amd64"
+          echo "$COSIGN_SHA256  $RUNNER_TEMP/bin/cosign" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/cosign"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Run the documented verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUMS_SHA256: ${{ needs.build.outputs.sums_sha256 }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          ./scripts/check-release-set.sh --dir "$RUNNER_TEMP/download" --sums-sha256 "$SUMS_SHA256" \
+            --extra SHA256SUMS.sigstore.json
+          gh --version | head -n1
+          cosign version | grep GitVersion
+          ./scripts/verify-release.sh --tag "$TAG" --dir "$RUNNER_TEMP/download" --repo "$GITHUB_REPOSITORY"
+
+  publish:
+    name: publish
+    needs: [build, sign, verify]
+    if: github.event_name == 'push' && github.ref_type == 'tag' && needs.build.outputs.publishable == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the set check
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/check-release-set.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Download the frozen set
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-set
+          path: ${{ runner.temp }}/publish
+          digest-mismatch: error
+
+      - name: Download the signature bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signature
+          path: ${{ runner.temp }}/publish
+          digest-mismatch: error
+
+      - name: Check exactly what will be published
+        env:
+          SUMS_SHA256: ${{ needs.build.outputs.sums_sha256 }}
+        run: |
+          ./scripts/check-release-set.sh --dir "$RUNNER_TEMP/publish" --sums-sha256 "$SUMS_SHA256" \
+            --extra SHA256SUMS.sigstore.json
+
+      - name: Create the GitHub release from the frozen files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          mongoose $VERSION. This repository's release workflow built every asset
+          once, gated it, and only then signed and attested it. Verify before use,
+          with cosign v3 and gh 2.49 or newer:
+
+          \`\`\`sh
+          cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \\
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/tags/$TAG" \\
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          sha256sum --check SHA256SUMS
+          gh attestation verify mongoose-linux-x86_64 --repo $GITHUB_REPOSITORY \\
+            --signer-workflow $GITHUB_REPOSITORY/.github/workflows/release.yml --source-ref refs/tags/$TAG
+          \`\`\`
+
+          \`scripts/verify-release.sh --tag $TAG\` runs these checks for every asset.
+          EOF
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "mongoose $VERSION" --notes-file "$RUNNER_TEMP/notes.md" \
+            "$RUNNER_TEMP"/publish/*
