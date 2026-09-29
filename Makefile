@@ -139,7 +139,7 @@ release-materials: binary
 # is injected with --define so the spec never drifts from Cargo.toml.
 rpm: release-materials | $(DIST)
 	rm -rf $(DIST)/rpmbuild
-	mkdir -p $(DIST)/rpmbuild/SOURCES
+	mkdir -p $(DIST)/rpmbuild/SOURCES $(DIST)/rpmbuild/tmp
 	cp $(BIN) $(PKGDIR)/mongoose.1 \
 		$(DIST)/LICENSE-MIT $(DIST)/LICENSE-LGPL-2.1.txt \
 		$(DIST)/LICENSE-BSD-2-Clause-libnfs.txt \
@@ -147,6 +147,7 @@ rpm: release-materials | $(DIST)
 		$(DIST)/rpmbuild/SOURCES/
 	rpmbuild -bb $(PKGDIR)/mongoose.spec \
 		--define "_topdir $(CURDIR)/$(DIST)/rpmbuild" \
+		--define "_tmppath $(CURDIR)/$(DIST)/rpmbuild/tmp" \
 		--define "pkg_version $(VERSION)" \
 		--target $(RPM_ARCH)
 	cp $(DIST)/rpmbuild/RPMS/$(RPM_ARCH)/mongoose-$(VERSION)-1*.rpm $(RPM_OUT)
