@@ -77,7 +77,9 @@ cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.34 -p mongoose
 | `mongoose-<ver>-relink-kit.tar.gz` | source, vendored Cargo dependencies, build scripts, offline relink procedure |
 | `LICENSES.txt`, `THIRD_PARTY_LICENSES.md`, `LIBNFS_SOURCE.md` | bare-binary companion notices |
 | `RELINK-VERIFICATION.txt` | successful modified-libnfs build/test/relink evidence |
-| `SHA256SUMS` | digests of every published release asset |
+| `mongoose-<ver>-sbom.cdx.json` | CycloneDX 1.5 SBOM of the binary: its Cargo crates, plus the statically linked libnfs |
+| `SHA256SUMS` | digests of every asset above |
+| `SHA256SUMS.sigstore.json` | Sigstore signature bundle for `SHA256SUMS`; added by the release workflow, not by `make release` |
 
 Packages and the tarball are portable by default. `make rpm PORTABLE=0`
 packages a host build instead; do not ship those. Package and asset
@@ -94,39 +96,83 @@ release also requires:
 
 ## Cutting a release
 
+Releases are built, signed, and published by `.github/workflows/release.yml`,
+not on a workstation. `make release` produces the same artifacts locally as a
+rehearsal, but nothing it builds is published.
+
 1. Bump `version` in `Cargo.toml`, the `.TH` line in
    `packaging/mongoose.1`, and add a `%changelog` entry to
-   `packaging/mongoose.spec`.
-2. Put clean libnfs and nfs-walker checkouts at the revisions in their lock
-   files. By default the Makefile expects sibling `../libnfs` and
-   `../nfs-walker` directories; override `LIBNFS_SOURCE` and
-   `NFS_WALKER_SOURCE` when needed.
-3. `cargo test -p mongoose`, then `make release` into an empty `DIST`. The
-   release command builds the companion source and relink assets, performs an
-   offline smoke test and portable relink with a deliberately modified libnfs,
-   inspects all package contents, and fails closed before writing checksums if
-   any compliance requirement is absent. It then runs
-   `scripts/check-release-artifacts.sh`, which fails the release unless all of
-   these hold:
-   - the bare binary depends only on libc and libm, uses glibc symbols no newer
-     than 2.34, and prints the right `--version` and `--help`;
-   - `SHA256SUMS` lists exactly the files in `DIST`, and they all verify;
-   - the RPM installs, runs, and uninstalls cleanly on Rocky Linux 9 (glibc
-     2.34), and the DEB does the same on Debian 12;
-   - the tarball and bare binary run on both of those systems;
-   - under qemu-user, the binary refuses to start on an emulated CPU without
-     AES-NI and starts on one with it.
-4. Commit, tag `vX.Y.Z`, push both.
-5. Upload every path recorded by `dist/SHA256SUMS`, plus `SHA256SUMS` itself.
-   Never publish only the executable or packages.
+   `packaging/mongoose.spec`. Merge that to `main` through a pull request.
+2. Tag that commit on `main` as `vX.Y.Z` and push the tag. The workflow
+   refuses to continue unless all of these hold:
+   - the tag, the Cargo version, and the checked-out commit agree;
+   - the commit is on `main`;
+   - no release exists for the tag yet.
+3. The **build** job sets up the locked toolchain, including
+   `make toolchain-check`, fetches the pinned libnfs and nfs-walker sources,
+   and runs `make release`. That builds every artifact once, generates and
+   validates the SBOM, writes `SHA256SUMS` over all of them, and then runs
+   the LGPL gate and `scripts/check-release-artifacts.sh`. It then freezes
+   exactly the files `SHA256SUMS` lists, and hands them to the later jobs
+   with the digest of `SHA256SUMS`.
+4. The **sign** job re-verifies those bytes, then does three things:
+   - attests build provenance for every file and for `SHA256SUMS`;
+   - attests the SBOM for the binary;
+   - signs `SHA256SUMS` with Sigstore (cosign, keyless).
+5. The **verify** job runs `scripts/verify-release.sh`, the procedure in
+   "Verifying a release" below, on a fresh runner.
+6. The **publish** job waits for the owner's approval in the protected
+   `release` environment. After approval, it re-verifies the bytes once more
+   and creates the GitHub release from exactly those files plus
+   `SHA256SUMS.sigstore.json`.
 
-The release generator refuses a dirty source tree so that the archives and
-evidence always describe the committed release. The relink kit's
-`RELINKING.md` and `verify-relink.sh` are the recipient-facing procedure.
+Nothing is rebuilt or regenerated between the gates, signing, and
+publication. A manual run of the workflow, or a pull request that touches the
+release machinery, is a dry run: it builds, gates, freezes, and checks the
+hand-off. It gets read-only permissions, and never signs, attests, or
+publishes.
+
+`make release` refuses a dirty source tree, so the archives and evidence
+always describe a committed revision. The relink kit's `RELINKING.md` and
+`verify-relink.sh` are the recipient-facing LGPL procedure.
 
 The README's install snippet fetches
 `releases/latest/download/mongoose-linux-x86_64`, so the bare-binary
 asset name must stay exactly that.
+
+## Verifying a release
+
+On any machine, with [cosign](https://github.com/sigstore/cosign) v3 and the
+GitHub CLI 2.49 or newer (logged in, or with `GH_TOKEN` set), download the
+release assets into an empty directory, then run the following, replacing
+`vX.Y.Z` with the release tag:
+
+```sh
+tag=vX.Y.Z
+repo=blakegolliher/mongoose
+
+# SHA256SUMS was signed by this repository's release workflow, for this tag.
+cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity "https://github.com/$repo/.github/workflows/release.yml@refs/tags/$tag" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+# Every asset matches SHA256SUMS.
+sha256sum --check --strict SHA256SUMS
+
+# Each asset was built by that workflow, at that tag, on a GitHub-hosted runner.
+gh attestation verify mongoose-linux-x86_64 --repo "$repo" \
+  --signer-workflow "$repo/.github/workflows/release.yml" \
+  --source-ref "refs/tags/$tag" --deny-self-hosted-runners
+
+# The published SBOM is the one attested for that binary.
+gh attestation verify mongoose-linux-x86_64 --repo "$repo" \
+  --signer-workflow "$repo/.github/workflows/release.yml" \
+  --source-ref "refs/tags/$tag" --predicate-type https://cyclonedx.org/bom
+```
+
+`scripts/verify-release.sh --tag vX.Y.Z --dir DIR` runs all of these,
+checking provenance for every asset. The release workflow runs that script on
+a fresh runner before anything is published.
 
 ## Workspace layout
 

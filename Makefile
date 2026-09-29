@@ -7,7 +7,10 @@
 #   make binary    bare binary + SHA256SUMS      -> dist/
 #   make libnfs-stage  reproducibly build pinned static libnfs
 #   make release-materials  source/relink/license assets + relink proof
-#   make release   rpm + deb + tarball + binary, then fail-closed compliance gate
+#   make release   rpm + deb + tarball + binary, SBOM, SHA256SUMS, then the
+#                  fail-closed LGPL and artifact gates (the release workflow
+#                  signs and publishes; see docs/BUILDING.md)
+#   make toolchain-check  verify every tool against the release lock
 #   make compliance-check  validate checked-in LGPL release policy
 #   make clean     remove dist/ (cargo clean is separate)
 #
@@ -65,6 +68,7 @@ TAR_OUT  := $(DIST)/mongoose-$(VERSION)-linux-$(TARGET_ARCH).tar.gz
 # releases/latest/download/, which needs a stable asset name.
 BIN_OUT  := $(DIST)/mongoose-linux-$(TARGET_ARCH)
 SUMS_OUT := $(DIST)/SHA256SUMS
+SBOM_OUT := $(DIST)/mongoose-$(VERSION)-sbom.cdx.json
 SOURCE_OUT := $(DIST)/mongoose-$(VERSION)-source.tar.gz
 RELINK_OUT := $(DIST)/mongoose-$(VERSION)-relink-kit.tar.gz
 LIBNFS_SHORT := $(shell jq -r .source_git_sha $(LIBNFS_LOCK) | cut -c1-12)
@@ -137,7 +141,12 @@ $(DIST):
 # Generate exact corresponding source, a vendored offline relink kit, license
 # notices, and evidence from an actual modified-libnfs relink. The generator
 # requires clean source trees at the pinned commits and fails before packaging.
+# The materials script runs cargo-about and cargo vendor offline, and both
+# need every crate in Cargo.lock, including other platforms' crates that a
+# Linux build never downloads. Fetch exactly the locked set first, so a
+# release also works from a cold Cargo cache.
 release-materials: binary
+	cargo fetch --locked
 	./scripts/build-lgpl-release-materials.sh \
 		--release-dir "$(DIST)" \
 		--version "$(VERSION)" \
@@ -197,16 +206,21 @@ tarball: release-materials | $(DIST)
 binary: $(BUILD_RULE) | $(DIST)
 	install -m0755 $(BIN) $(BIN_OUT)
 
+# Order matters and nothing is rebuilt along the way: every artifact, then the
+# SBOM, then SHA256SUMS over all of them, then both gates against those exact
+# bytes.
 release: release-materials rpm deb tarball binary
-	./scripts/check-lgpl-compliance.sh --release-dir "$(DIST)" --version "$(VERSION)" --binary "$(BIN_OUT)"
+	./scripts/build-sbom.sh --binary "$(BIN_OUT)" --version "$(VERSION)" --output "$(SBOM_OUT)"
 	cd $(DIST) && sha256sum \
-		$(notdir $(RPM_OUT) $(DEB_OUT) $(TAR_OUT) $(BIN_OUT) $(COMPLIANCE_ASSETS)) \
+		$(notdir $(RPM_OUT) $(DEB_OUT) $(TAR_OUT) $(BIN_OUT) $(SBOM_OUT) $(COMPLIANCE_ASSETS)) \
 		> $(notdir $(SUMS_OUT))
+	./scripts/check-lgpl-compliance.sh --release-dir "$(DIST)" --version "$(VERSION)" --binary "$(BIN_OUT)"
 	./scripts/check-release-artifacts.sh --release-dir "$(DIST)" --version "$(VERSION)" \
-		--binary "$(BIN_OUT)" --rpm "$(RPM_OUT)" --deb "$(DEB_OUT)" --tarball "$(TAR_OUT)"
+		--binary "$(BIN_OUT)" --rpm "$(RPM_OUT)" --deb "$(DEB_OUT)" --tarball "$(TAR_OUT)" \
+		--sbom "$(SBOM_OUT)"
 	@echo
 	@echo "release artifacts:"
-	@ls -l $(RPM_OUT) $(DEB_OUT) $(TAR_OUT) $(BIN_OUT) $(COMPLIANCE_ASSETS) $(SUMS_OUT)
+	@ls -l $(RPM_OUT) $(DEB_OUT) $(TAR_OUT) $(BIN_OUT) $(SBOM_OUT) $(COMPLIANCE_ASSETS) $(SUMS_OUT)
 
 clean:
 	rm -rf $(DIST)

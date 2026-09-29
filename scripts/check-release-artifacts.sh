@@ -6,6 +6,7 @@
 #   dynamic dependencies, glibc symbols no newer than the declared floor, and
 #   working --version and --help;
 # - SHA256SUMS: every file in the release directory is listed and verifies;
+# - the SBOM: scripts/check-sbom.sh accepts it for this exact binary;
 # - packages: the RPM installs, runs, and uninstalls cleanly on Rocky Linux 9
 #   (glibc 2.34, the oldest supported platform), the DEB does the same on
 #   Debian 12, and the tarball and bare binary run on both;
@@ -34,6 +35,7 @@ binary=""
 rpm=""
 deb=""
 tarball=""
+sbom=""
 while (($#)); do
     test $# -ge 2 || fail "$1 needs a value"
     case "$1" in
@@ -43,13 +45,14 @@ while (($#)); do
         --rpm) rpm="$2" ;;
         --deb) deb="$2" ;;
         --tarball) tarball="$2" ;;
+        --sbom) sbom="$2" ;;
         *) fail "unknown argument: $1" ;;
     esac
     shift 2
 done
 test -d "$release_dir" || fail "--release-dir must name the release directory"
 test -n "$version" || fail "--version is required"
-for file in "$binary" "$rpm" "$deb" "$tarball"; do
+for file in "$binary" "$rpm" "$deb" "$tarball" "$sbom"; do
     test -f "$file" || fail "missing artifact: ${file:-(unset)}"
 done
 for command_name in readelf objdump sha256sum podman; do
@@ -93,6 +96,11 @@ test "$listed" = "$present" || {
     fail "SHA256SUMS does not list exactly the files in $release_dir (build into a clean DIST)"
 }
 echo "  $(wc -l <<<"$listed") assets listed and verified"
+
+echo "== SBOM: $sbom"
+grep -Fxq "$(basename -- "$sbom")" <<<"$listed" || fail "SHA256SUMS does not list the SBOM"
+./scripts/check-sbom.sh --sbom "$sbom" --binary "$binary" --version "$version" | sed 's/^/  /' \
+    || fail "the SBOM does not describe this release"
 
 # Run SCRIPT in IMAGE with the artifacts mounted read-only under /pkg. NETWORK
 # is "none" or "default".
