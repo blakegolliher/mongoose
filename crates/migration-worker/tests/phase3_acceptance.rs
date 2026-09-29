@@ -21,6 +21,10 @@
 //!    → `full_lifecycle_register_emit_pause_resume_fence` (pause
 //!    step)
 
+// Exercises the orchestrator or the coordinator client, which exist
+// only with the `distributed` feature.
+#![cfg(feature = "distributed")]
+
 use chrono::{TimeZone, Utc};
 use migration_control_protocol::schema::{ConfigHash, EventKind, JobId, WorkerState};
 use migration_coord::lease::{Identity, LeaseConfig};

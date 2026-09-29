@@ -1,7 +1,8 @@
 # PR-11B handoff — dependency and advisory remediation
 
-Status: **ready for boundary design** (Phase 1). Phase 2 starts only after
-the owner approves the Phase 1 design.
+Status: **Phase 1 implemented** on branch `pr-11b-feature-boundaries`
+(2026-09-29), awaiting owner review of the design below. Phase 2 starts only
+after the owner approves it.
 
 Suggested implementers:
 
@@ -66,6 +67,12 @@ support `verify_tls = false` in `crates/migration-core/src/s3.rs`, through
 the deprecated `hyper_014::HyperClientBuilder`. Removing that path from the
 workspace is expected to remove `h2` 0.3, `rustls` 0.21, and `rustls-webpki`
 0.101. Confirm that with `cargo tree -i` after the change.
+
+Phase 1 found that paragraph incomplete. `aws-sdk-s3`'s default `rustls`
+feature enables the same legacy connector a second way
+(`aws-smithy-runtime/tls-rustls` turns on `legacy-rustls-ring` and
+`hyper-014`). Removing only the `verify_tls = false` path therefore left
+`h2` 0.3 and `rustls-webpki` 0.101 in the lock. See "Phase 1 design" below.
 
 The version targets do not raise the workspace MSRV (`rust-version = "1.91.1"`):
 `parquet` 59.2.0 declares 1.85, `parquet`/`arrow` 60.0.0 declare 1.88, and
@@ -172,6 +179,78 @@ then the structural changes:
 Workspace-wide commands unify features across all members. They can compile
 mongoose with S3 enabled even when mongoose alone would not build, so the
 per-package commands in the acceptance section are required.
+
+## Phase 1 design (implemented)
+
+Feature boundaries:
+
+- **`migration-core/s3`**, off by default. It gates the `s3` module (the
+  `S3Client` and its `ClaimStore` implementation), `Error::S3`, and the
+  optional `aws-sdk-s3` and `aws-config` dependencies. It is off by default so
+  every crate that depends on core (mover, resync, mig-walker-rewrite,
+  mongoose) stays free of AWS without having to opt out. `migration-coord`
+  enables it, because `S3Store` keeps the lease, snapshots, event log, and
+  archive in S3, and so does `migration-worker/distributed`.
+- **`migration-worker/distributed`**, on by default. It gates `coord_client`,
+  `coord_driver`, `orchestrator`, and the optional `reqwest`, enables
+  `migration-core/s3`, and is a `required-features` of the `mig-worker`
+  binary. It is on by default so `cargo test --workspace --locked` still
+  builds `mig-worker` and runs every engine test with no new flags. The six
+  worker integration tests carry `#![cfg(feature = "distributed")]`, and all
+  six still run under the workspace build.
+- **mongoose** depends on `migration-worker` with `default-features = false`
+  and on core without `s3`. It is the only crate that opts out.
+
+Code moves:
+
+- `EventEmitter` and `WorkerEventDraft` (with their three unit tests) moved
+  from `coord_driver` into a new ungated `migration_worker::events` module.
+  `coord_driver` re-exports both, so the orchestrator and test paths are
+  unchanged. `shard_processor` and mongoose import from `events`.
+- The `ClaimStore` trait stays ungated in `claim.rs`, because `heartbeat` uses
+  it. The only exhaustive match on `Error::S3` is in `orchestrator`, which is
+  `distributed`-only and therefore always has `s3`.
+
+Owner decision 1:
+
+- `S3Client::from_config` rejects `verify_tls = false` before any network I/O
+  or credential lookup. A unit test uses an unroutable endpoint to prove it.
+  `insecure_http_client`, `NoCertVerifier`, and the workspace entries for
+  `aws-smithy-http-client` (`hyper-014`, `legacy-rustls-ring`),
+  `hyper-rustls` 0.24, and `rustls` 0.21 are gone.
+- The workspace now takes `aws-sdk-s3`'s default features minus `rustls`:
+  `sigv4a`, `http-1x`, `default-https-client`, and `rt-tokio`. This changes no
+  runtime behavior. With `BehaviorVersion::latest()`, `aws-smithy-runtime`
+  already selected the `default-https-client` (hyper 1, rustls 0.23) stack,
+  and the legacy connector was compiled in but unused.
+- `[run].verify_tls = false` still parses. `[coord].verify_tls` is untouched,
+  and the coordinator tests that set it to `false` pass unchanged.
+  `var204_smoke` now defaults `VAMOOSE_TEST_S3_VERIFY_TLS` to verified TLS.
+
+Results, measured locally with the CI-built libnfs archive:
+
+- `cargo tree -p mongoose -e normal` has 169 unique crates, down from 317, and
+  the acceptance `grep` prints nothing. mongoose links no AWS, HTTP, TLS, or
+  crypto-backend crate.
+- `Cargo.lock` only loses packages: `h2` 0.3.27, `hyper` 0.14.32,
+  `hyper-rustls` 0.24.2, `rustls` 0.21.12, `rustls-webpki` 0.101.7, `sct`
+  0.7.1, and `tokio-rustls` 0.24.1.
+- `cargo deny --locked check advisories` drops from seven findings to three,
+  all Phase 2 work: RUSTSEC-2026-0285 (`rustls` 0.23.40, which is now only in
+  the engine crates' graph), `number_prefix`, and `paste`.
+- These all pass:
+  - `cargo fmt --all -- --check`;
+  - `cargo clippy --workspace --all-targets --locked -- -D warnings`;
+  - `cargo clippy -p mongoose --all-targets --locked -- -D warnings`;
+  - Clippy on `migration-core` with and without `--features s3`;
+  - Clippy on `migration-worker --no-default-features` for `--lib` and
+    `--all-targets`;
+  - `cargo test --workspace --locked` (733 passed, 0 failed, 28 ignored);
+  - `cargo test -p mongoose --locked` (124 passed);
+  - `cargo test -p migration-core` with and without `--features s3`;
+  - `cargo test -p migration-worker --no-default-features --locked` (55
+    passed);
+  - ShellCheck and `make compliance-check`.
 
 ## Phase 2 — mechanical updates (after the design is approved)
 

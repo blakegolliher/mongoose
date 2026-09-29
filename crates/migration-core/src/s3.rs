@@ -110,15 +110,15 @@ impl S3Client {
         Self::from_config(endpoint_url, region, bucket, None, true).await
     }
 
-    /// Build an `S3Client` with optional credentials profile and TLS
-    /// verification toggle. Both knobs exist for VAST lab workflows
-    /// (custom profile names, self-signed certs); the defaults match
-    /// `from_env`.
+    /// Build an `S3Client` with an optional credentials profile; the
+    /// defaults match `from_env`.
     ///
-    /// `verify_tls = false` plumbs a custom rustls `ClientConfig` whose
-    /// `ServerCertVerifier` accepts every certificate. Equivalent to
-    /// `aws-cli --no-verify-ssl`. Do not use against production
-    /// endpoints — silently accepting any certificate defeats TLS.
+    /// `verify_tls` is the `[run] verify_tls` setting. `false` is
+    /// rejected here, before any network I/O: the S3 client always
+    /// verifies the endpoint's certificate. The insecure mode it used
+    /// to select depended on a TLS stack with unfixed advisories
+    /// (PR-11B), so the setting still parses but no longer takes
+    /// effect.
     pub async fn from_config(
         endpoint_url: &str,
         region: &str,
@@ -126,6 +126,15 @@ impl S3Client {
         profile: Option<&str>,
         verify_tls: bool,
     ) -> Result<Self> {
+        if !verify_tls {
+            return Err(Error::Other(anyhow::anyhow!(
+                "`[run] verify_tls = false` is no longer supported: S3 TLS \
+                 certificate verification cannot be disabled. Remove the \
+                 setting (or set it to true) and give the S3 endpoint \
+                 {endpoint_url} a certificate this host trusts."
+            )));
+        }
+
         let mut loader = aws_config::defaults(BehaviorVersion::latest())
             .region(Region::new(region.to_string()))
             .endpoint_url(endpoint_url);
@@ -144,17 +153,9 @@ impl S3Client {
 
         let aws_cfg = loader.load().await;
 
-        let mut s3_cfg = aws_sdk_s3::config::Builder::from(&aws_cfg)
+        let s3_cfg = aws_sdk_s3::config::Builder::from(&aws_cfg)
             .force_path_style(true)
             .timeout_config(client_timeouts());
-
-        if !verify_tls {
-            tracing::warn!(
-                endpoint = endpoint_url,
-                "TLS certificate verification disabled — accepting any cert from the S3 endpoint",
-            );
-            s3_cfg = s3_cfg.http_client(insecure_http_client());
-        }
 
         let client = Client::from_conf(s3_cfg.build());
         Ok(Self::new(client, bucket.to_string()))
@@ -198,55 +199,6 @@ pub fn client_timeouts() -> aws_sdk_s3::config::timeout::TimeoutConfig {
         .operation_attempt_timeout(ATTEMPT_TIMEOUT)
         .operation_timeout(OPERATION_TIMEOUT)
         .build()
-}
-
-/// Build a `SharedHttpClient` whose TLS layer accepts any server
-/// certificate. Used when `verify_tls = false` in worker config.
-///
-/// The smithy 1.x `TlsContext` has no public "danger" knob, so we
-/// route through the deprecated `hyper_014::HyperClientBuilder` —
-/// public, but flagged for removal upstream. When smithy exposes a
-/// supported knob we collapse this back to a one-liner.
-fn insecure_http_client() -> aws_sdk_s3::config::SharedHttpClient {
-    use aws_smithy_http_client::hyper_014::HyperClientBuilder;
-    use std::sync::Arc;
-
-    let crypto = rustls::ClientConfig::builder()
-        .with_safe_defaults()
-        .with_custom_certificate_verifier(Arc::new(NoCertVerifier))
-        .with_no_client_auth();
-
-    let connector = hyper_rustls::HttpsConnectorBuilder::new()
-        .with_tls_config(crypto)
-        // VAST endpoints are HTTPS; allow plain HTTP too for the rare
-        // bench-mode override. https_only would be stricter; not worth
-        // the surprise factor on a debugging knob.
-        .https_or_http()
-        .enable_http1()
-        .enable_http2()
-        .build();
-
-    HyperClientBuilder::new().build(connector)
-}
-
-/// rustls 0.21 `ServerCertVerifier` that performs no validation. The
-/// behavior is intentional: this struct is only constructed on the
-/// `verify_tls = false` branch of `S3Client::from_config`.
-#[derive(Debug)]
-struct NoCertVerifier;
-
-impl rustls::client::ServerCertVerifier for NoCertVerifier {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::Certificate,
-        _intermediates: &[rustls::Certificate],
-        _server_name: &rustls::ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
-        _ocsp_response: &[u8],
-        _now: std::time::SystemTime,
-    ) -> std::result::Result<rustls::client::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::ServerCertVerified::assertion())
-    }
 }
 
 // =============================================================================
@@ -744,6 +696,22 @@ mod tests {
             ATTEMPT_TIMEOUT < OPERATION_TIMEOUT,
             "the operation bound must leave room for at least one retry",
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // `[run] verify_tls = false` — rejected at client startup (PR-11B).
+    // -------------------------------------------------------------------------
+
+    /// The unreachable endpoint proves the rejection happens before any
+    /// network I/O or credential lookup.
+    #[tokio::test]
+    async fn from_config_rejects_disabled_tls_verification() {
+        let err = S3Client::from_config("https://192.0.2.1:9", "us-east-1", "b", None, false)
+            .await
+            .expect_err("verify_tls = false must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("verify_tls = false"), "{msg}");
+        assert!(msg.contains("https://192.0.2.1:9"), "{msg}");
     }
 
     // -------------------------------------------------------------------------

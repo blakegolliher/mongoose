@@ -16,6 +16,10 @@
 //! pinned by the existing `record_outcome_*` tests in
 //! `src/shard_processor.rs`.
 
+// Exercises the orchestrator or the coordinator client, which exist
+// only with the `distributed` feature.
+#![cfg(feature = "distributed")]
+
 // F42 transient-retry acceptance tests live in a submodule of this
 // binary rather than their own tests/*.rs file: every top-level test
 // file links a separate full-workspace debug executable, and one

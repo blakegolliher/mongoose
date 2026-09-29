@@ -8,11 +8,9 @@ description = "Shared types, S3 protocol, and parquet schema for the migration s
 publish     = false
 
 [dependencies]
-aws-sdk-s3 = { workspace = true }
-aws-config = { workspace = true }
-aws-smithy-http-client = { workspace = true }
-hyper-rustls = { workspace = true }
-rustls       = { workspace = true }
+# Only with the `s3` feature (see [features]).
+aws-sdk-s3 = { workspace = true, optional = true }
+aws-config = { workspace = true, optional = true }
 
 arrow   = { workspace = true }
 parquet = { workspace = true }
@@ -41,6 +39,11 @@ tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
 
 [features]
+# The S3 client (`s3` module, `Error::S3`) and the AWS SDK it needs.
+# Off by default: only the distributed engine (mig-worker's
+# `distributed` feature, migration-coord) talks to S3, and mongoose
+# must not link the AWS/TLS stack.
+s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
 # Exposes `claim::test_util` (the in-memory mock ClaimStore used by
 # this crate's own protocol tests) to downstream crates' tests, so
 # integration harnesses don't fork a divergent copy of the mock.

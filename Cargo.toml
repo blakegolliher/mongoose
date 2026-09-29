@@ -28,19 +28,15 @@ migration-control-protocol = { path = "crates/migration-control-protocol" }
 migration-mover            = { path = "crates/migration-mover" }
 migration-coord            = { path = "crates/migration-coord" }
 
-# AWS / S3 (pulled in by the shared engine crates; mongoose itself
-# does no S3 I/O)
-aws-sdk-s3   = "1"
+# AWS / S3 (engine crates only, behind migration-core's opt-in `s3`
+# feature; mongoose does no S3 I/O and its graph excludes these)
+# aws-sdk-s3's defaults minus `rustls`, which only adds the legacy
+# hyper-0.14/rustls-0.21 connector (RUSTSEC h2 0.3, rustls-webpki
+# 0.101). With `BehaviorVersion::latest()` the SDK already uses the
+# `default-https-client` stack, so dropping it changes no behavior.
+aws-sdk-s3   = { version = "1", default-features = false, features = ["sigv4a", "http-1x", "default-https-client", "rt-tokio"] }
 aws-config   = "1"
 aws-smithy-types-convert = { version = "0.60", features = ["convert-chrono"] }
-# Used only on the `verify_tls = false` path to wire a custom rustls
-# ClientConfig into the SDK. The smithy 1.x TLS context has no public
-# "skip cert verification" knob, so we route through the deprecated-
-# but-public hyper_014 builder. Remove when smithy exposes a danger
-# knob upstream and we can drop the legacy path.
-aws-smithy-http-client = { version = "1", default-features = false, features = ["hyper-014", "legacy-rustls-ring"] }
-hyper-rustls = { version = "0.24", default-features = false, features = ["http1", "http2", "tls12", "tokio-runtime", "logging"] }
-rustls       = { version = "0.21", features = ["dangerous_configuration"] }
 
 # Parquet / Arrow (match nfs-walker's version family)
 arrow   = { version = "54", default-features = false, features = ["ipc"] }

@@ -27,7 +27,7 @@ use migration_core::fence::Fence;
 use migration_mover::batch::{BatchBudget, InflightLimiter, InflightProfile};
 use migration_mover::{DowngradeSink, FailureSink};
 use migration_worker::caps;
-use migration_worker::coord_driver::EventEmitter;
+use migration_worker::events::EventEmitter;
 use migration_worker::heartbeat::LivePending;
 use migration_worker::mover_factory::{self, MoverParams};
 use migration_worker::shard_processor::ShardProcessor;

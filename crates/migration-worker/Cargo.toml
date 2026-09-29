@@ -14,6 +14,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "mig-worker"
 path = "src/main.rs"
+required-features = ["distributed"]
 
 [dependencies]
 migration-core  = { workspace = true }
@@ -39,8 +40,16 @@ getrandom = { workspace = true }
 libc     = { workspace = true }
 uuid     = { workspace = true }
 
-# HTTP client for the coord-facing wire layer (Phase 3).
-reqwest = { workspace = true }
+# HTTP client for the coord-facing wire layer (Phase 3). Only with
+# the `distributed` feature.
+reqwest = { workspace = true, optional = true }
+
+[features]
+# The S3-claim orchestrator, the coordinator HTTP client, and the
+# mig-worker binary that needs both. mongoose turns this off
+# (`default-features = false`) and uses only shard processing.
+default = ["distributed"]
+distributed = ["dep:reqwest", "migration-core/s3"]
 
 [dev-dependencies]
 # In-process coordinator integration tests only.

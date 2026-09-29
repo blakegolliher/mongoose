@@ -15,6 +15,10 @@
 //! orchestrator's (probe-token check first, sleep-a-heartbeat when
 //! gated). Claim attempts are counted from the store's op log.
 
+// Exercises the orchestrator or the coordinator client, which exist
+// only with the `distributed` feature.
+#![cfg(feature = "distributed")]
+
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
