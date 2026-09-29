@@ -17,9 +17,10 @@
 //! - RENAME by (dir_fh, name) pairs.
 //!
 //! After one amortized READDIRPLUS per source directory, a typical
-//! tiny file costs READ + CREATE + WRITE + SETATTR + RENAME = 5 RPCs
-//! (4 with direct commit). Missing/omitted/stale prefetched handles
-//! retain the original per-name LOOKUP fallback.
+//! tiny file costs GETATTR + READ + GETATTR + CREATE + WRITE + SETATTR +
+//! RENAME = 7 RPCs (6 with direct commit). The two GETATTRs are the source
+//! stability bracket. Missing/omitted/stale prefetched handles retain the
+//! original per-name LOOKUP fallback.
 //!
 //! ## Execution model
 //!
@@ -54,6 +55,48 @@ use std::os::raw::{c_char, c_int, c_void};
 use bindings as b;
 
 use super::NfsContext;
+
+// `bindings.rs` is intentionally allowlisted to only the raw calls used by
+// this module. GETATTR was not part of the original set, so keep its small
+// NFSv3 wire surface here beside the wrapper instead of hand-editing the
+// generated file. Layouts come directly from libnfs-raw-nfs.h.
+#[repr(C)]
+struct Getattr3Args {
+    object: b::nfs_fh3,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct Getattr3ResOk {
+    obj_attributes: b::fattr3,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+union Getattr3ResUnion {
+    resok: Getattr3ResOk,
+}
+
+#[repr(C)]
+struct Getattr3Res {
+    status: b::nfsstat3,
+    result: Getattr3ResUnion,
+}
+
+unsafe extern "C" {
+    fn rpc_nfs3_getattr_task(
+        rpc: *mut b::rpc_context,
+        cb: b::rpc_cb,
+        args: *mut Getattr3Args,
+        private_data: *mut c_void,
+    ) -> *mut b::rpc_pdu;
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<Getattr3Args>() == 16);
+    assert!(std::mem::size_of::<Getattr3ResOk>() == 88);
+    assert!(std::mem::size_of::<Getattr3Res>() == 96);
+};
 
 /// RPC_STATUS_* from libnfs-raw.h (defines, not enums — kept local).
 const RPC_STATUS_SUCCESS: c_int = 0;
@@ -97,6 +140,16 @@ pub struct RawError {
     /// errno-style tag; "EIO" for transport errors.
     pub tag: &'static str,
     pub detail: String,
+}
+
+/// Source attributes used by the raw-FH torn-copy bracket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileStat {
+    pub size: u64,
+    pub mtime_sec: i64,
+    pub mtime_nsec: i32,
+    pub ctime_sec: i64,
+    pub ctime_nsec: i32,
 }
 
 impl RawError {
@@ -167,6 +220,7 @@ pub struct Ident {
 enum Out {
     Fh(Fh),
     Lookup { fh: Fh, ident: Option<Ident> },
+    Attr(FileStat),
     Readdirplus(ReaddirplusPage),
     Read { count: u32, eof: bool },
     Write { count: u32 },
@@ -449,6 +503,50 @@ pub fn lookup(nfs: &mut NfsContext, dir_fh: &[u8], name: &[u8]) -> Result<Fh, Ra
     match slot.finish("LOOKUP")? {
         Out::Fh(fh) => Ok(fh),
         _ => unreachable!("LOOKUP slot holds Fh"),
+    }
+}
+
+unsafe extern "C" fn cb_getattr(
+    rpc: *mut b::rpc_context,
+    status: c_int,
+    data: *mut c_void,
+    pd: *mut c_void,
+) {
+    let slot = &mut *(pd as *mut Slot);
+    if let Some(data) = slot.begin(rpc, status, data) {
+        let res = &*(data as *const Getattr3Res);
+        slot.nfs_status = res.status;
+        if res.status == b::NFS3_OK {
+            let a = res.result.resok.obj_attributes;
+            slot.out = Some(Out::Attr(FileStat {
+                size: a.size,
+                mtime_sec: i64::from(a.mtime.seconds),
+                mtime_nsec: a.mtime.nseconds as i32,
+                ctime_sec: i64::from(a.ctime.seconds),
+                ctime_nsec: a.ctime.nseconds as i32,
+            }));
+        }
+    }
+}
+
+/// GETATTR against an NFSv3 filehandle.
+///
+/// The raw mover never owns a high-level `nfsfh`, so this is its equivalent
+/// of `nfs_fstat64`: both observations name the exact object being read.
+pub fn getattr(nfs: &mut NfsContext, fh: &[u8]) -> Result<FileStat, RawError> {
+    let mut slot = Slot::new();
+    let mut args = Getattr3Args { object: fh3(fh) };
+    issue!(nfs, &slot, "GETATTR", {
+        rpc_nfs3_getattr_task(
+            rpc_of(nfs),
+            Some(cb_getattr),
+            &mut args,
+            &mut slot as *mut Slot as *mut c_void,
+        )
+    });
+    match slot.finish("GETATTR")? {
+        Out::Attr(stat) => Ok(stat),
+        _ => unreachable!("GETATTR slot holds Attr"),
     }
 }
 

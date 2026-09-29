@@ -94,6 +94,17 @@ pruned; delete them by hand once their reports are no longer needed.
   stamped at CREATE, FILE_SYNC writes, one SETATTR for times, then an
   atomic `.partial` to final-name RENAME. A crash can never leave a
   torn file visible under its final name.
+- Each regular-file read is bracketed by source attributes taken from the
+  exact open filehandle. The default raw path issues NFSv3 GETATTR before and
+  after the read; the path-based fallback uses `nfs_fstat64`. Size, mtime, and
+  ctime (including nanoseconds) must all remain stable. A missing post-stat
+  fails the row without publishing it. A changed bracket may still publish
+  under the at-least-once policy, but it increments `files_torn`, writes a
+  durable `TORN_COPY` downgrade, and forces the path into the next sync even
+  when its later scan tuple matches. Cutover refuses unresolved torn rows.
+- This safety check costs two source metadata RPCs per non-empty regular file.
+  It is intentional for the synchronous/raw mover mongoose ships; release
+  qualification must include the raw-mover throughput gate on real hardware.
 - Source/destination overlap is refused at `copy` (same server, same
   path or nested either way) and re-proved on every `copy` and `sync`
   from the recorded manifest, in three layers; see
