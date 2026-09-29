@@ -24,3 +24,11 @@ therefore satisfy the static-link obligations in
 
 Do not interpret the repository's MIT license as replacing or weakening the
 LGPL terms that apply to the bundled libnfs component.
+
+## No AI attribution
+
+Commits, pull request titles and descriptions, and review comments must not
+credit an AI assistant. That means no co-author or other trailer naming one,
+no "generated with" line, no assistant session link, and no AI author or
+committer identity. The `attribution` check (`scripts/check-attribution.sh`)
+enforces this on every pull request and every push to `main`.
