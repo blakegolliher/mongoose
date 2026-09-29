@@ -638,6 +638,8 @@ During the readiness review:
 3. Add a reviewed `deny.toml`. Update vulnerable dependencies or feature-gate
    unused S3/coordinator/HTTP/TLS code out of the mongoose dependency graph.
    Do not waive an advisory merely because dead-code elimination is expected.
+   This is PR-11B; its handoff is
+   `docs/PR_11B_DEPENDENCY_REMEDIATION_HANDOFF.md`.
 4. Build with `--locked`; verify the actual Rust, cargo-zigbuild, and Zig
    versions against `packaging/release-toolchain.lock.json` rather than merely
    recording them.
