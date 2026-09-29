@@ -24,7 +24,7 @@ test -n "$zig_bin" || fail "Zig is required; set ZIG=/path/to/zig"
 
 mismatches=0
 # check NAME LOCK_KEY COMMAND...: the first line the command prints must contain
-# the locked version as a whole word.
+# the locked version as a whole word (a "+build" suffix is allowed).
 check() {
     local name="$1"
     local key="$2"
@@ -38,7 +38,8 @@ check() {
         return
     fi
     line=${output%%$'\n'*}
-    if [[ " $line " == *" $want "* ]]; then
+    local pattern="(^|[[:space:]])${want//./\\.}([[:space:]+]|$)"
+    if [[ "$line" =~ $pattern ]]; then
         echo "  $name $want"
     else
         echo "  $name: locked $want, found: $line" >&2
@@ -58,5 +59,7 @@ done
 check tar gnu_tar tar --version
 check gzip gzip gzip --version
 check cargo-about cargo_about cargo about --version
+check cargo-cyclonedx cargo_cyclonedx cargo cyclonedx --version
+check cyclonedx-cli cyclonedx_cli "${CYCLONEDX:-cyclonedx}" --version
 
 test "$mismatches" -eq 0 || fail "$mismatches tool(s) differ from the lock"
