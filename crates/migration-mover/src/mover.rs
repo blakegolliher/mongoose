@@ -40,7 +40,7 @@ use crate::batch::InflightProfile;
 use crate::downgrade::DowngradeSink;
 use crate::error::MoveError;
 use crate::libnfs::raw::{self, RawSattr};
-use crate::libnfs::{ops, ContextPair, LibnfsContextPool, NfsContext};
+use crate::libnfs::{nfs_stat_64, ops, ContextPair, LibnfsContextPool, NfsContext};
 use crate::paths::{join_root, partial_path};
 use crate::strategy::{self, Strategy, StrategyContext};
 use migration_core::fence::Fence;
@@ -90,11 +90,77 @@ pub struct MoveOutcome {
     /// (`FileCopyResult::torn` → `file_mover::classify_copy`). The
     /// row still counts as copied; a `DowngradeKind::TornCopy` record
     /// was emitted, and the shard processor bumps `files_torn`.
-    /// Detection is async-path-only: the sync path
-    /// (`do_libnfs_copy`) has no pre/post stat bracket and always
-    /// reports `false`.
+    /// Both the synchronous/raw-FH path and the bucketed async path bracket
+    /// the read with stats on the same source filehandle.
     pub torn: bool,
     pub result: Result<(), MoveError>,
+}
+
+/// Internal success value for the synchronous mover. Non-regular strategies
+/// always return `clean(0)`; regular-file paths return their real byte count
+/// plus the source-stat bracket result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SyncMoveResult {
+    bytes_moved: u64,
+    torn: bool,
+}
+
+impl SyncMoveResult {
+    const fn clean(bytes_moved: u64) -> Self {
+        Self {
+            bytes_moved,
+            torn: false,
+        }
+    }
+}
+
+/// The source fields that make a read stable. Nanoseconds participate in the
+/// comparison even though the long-standing `TornCopy` wire payload retains
+/// its seconds-only triples for compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SourceSnapshot {
+    size: u64,
+    mtime_sec: i64,
+    mtime_nsec: i32,
+    ctime_sec: i64,
+    ctime_nsec: i32,
+}
+
+impl SourceSnapshot {
+    const fn wire_tuple(self) -> (u64, i64, i64) {
+        (self.size, self.mtime_sec, self.ctime_sec)
+    }
+}
+
+impl From<nfs_stat_64> for SourceSnapshot {
+    fn from(st: nfs_stat_64) -> Self {
+        Self {
+            size: st.nfs_size,
+            mtime_sec: st.nfs_mtime as i64,
+            mtime_nsec: st.nfs_mtime_nsec as i32,
+            ctime_sec: st.nfs_ctime as i64,
+            ctime_nsec: st.nfs_ctime_nsec as i32,
+        }
+    }
+}
+
+impl From<raw::FileStat> for SourceSnapshot {
+    fn from(st: raw::FileStat) -> Self {
+        Self {
+            size: st.size,
+            mtime_sec: st.mtime_sec,
+            mtime_nsec: st.mtime_nsec,
+            ctime_sec: st.ctime_sec,
+            ctime_nsec: st.ctime_nsec,
+        }
+    }
+}
+
+fn torn_downgrade(pre: SourceSnapshot, post: SourceSnapshot) -> Option<DowngradeKind> {
+    (pre != post).then_some(DowngradeKind::TornCopy {
+        pre: pre.wire_tuple(),
+        post: post.wire_tuple(),
+    })
 }
 
 /// Internal configuration consumed by the two implemented libnfs movers.
@@ -679,6 +745,30 @@ impl Mover {
         &self.downgrades
     }
 
+    /// Turn a changed source-stat bracket into the durable downgrade stream
+    /// consumed by mongoose's next sync pass. The row still commits: this is
+    /// at-least-once convergence, not an in-place retry loop that could chase
+    /// a permanently hot file forever.
+    fn record_torn_if_changed(
+        &self,
+        row: &RowView,
+        pre: SourceSnapshot,
+        post: SourceSnapshot,
+    ) -> bool {
+        let Some(downgrade) = torn_downgrade(pre, post) else {
+            return false;
+        };
+        tracing::warn!(
+            path = %String::from_utf8_lossy(&row.path),
+            row_id = row.row_id,
+            ?pre,
+            ?post,
+            "source modified during synchronous copy; committing and recording TORN_COPY",
+        );
+        self.downgrades.record(row.row_id, &row.path, downgrade);
+        true
+    }
+
     // =========================================================================
     // Public entry points used by the shard processor.
     // =========================================================================
@@ -708,7 +798,8 @@ impl Mover {
         let path = row.path.clone();
         self.run_with_pair(row, Strategy::HardlinkExisting, move |me, pair| {
             // F41: a hardlink writes no file data — report 0 bytes.
-            me.do_hardlink(pair, &target, &path).map(|()| 0)
+            me.do_hardlink(pair, &target, &path)
+                .map(|()| SyncMoveResult::clean(0))
         })
         .await
     }
@@ -716,11 +807,11 @@ impl Mover {
     /// Common framing: pick-strategy → acquire-pair → spawn_blocking →
     /// build MoveOutcome. The closure receives the cloned mover and a
     /// mutable borrow of the pair so it can drive any of the
-    /// strategy-specific sync paths; on success it returns the bytes
-    /// it actually wrote (F41), which becomes `MoveOutcome::bytes_moved`.
+    /// strategy-specific sync paths; on success it returns the bytes it
+    /// actually wrote plus whether its source-stat bracket changed.
     async fn run_with_pair<F>(&self, row: &RowView, strategy: Strategy, work: F) -> MoveOutcome
     where
-        F: FnOnce(&Mover, &mut ContextPair) -> Result<u64, MoveError> + Send + 'static,
+        F: FnOnce(&Mover, &mut ContextPair) -> Result<SyncMoveResult, MoveError> + Send + 'static,
     {
         let row_id = row.row_id;
 
@@ -758,9 +849,8 @@ impl Mover {
             strategy,
             // F41: the bytes the body actually wrote — never row.size
             // taken on faith. 0 on failure (pre-existing contract).
-            bytes_moved: *result.as_ref().unwrap_or(&0),
-            // Sync paths have no torn detection (see do_libnfs_copy).
-            torn: false,
+            bytes_moved: result.as_ref().map_or(0, |r| r.bytes_moved),
+            torn: result.as_ref().is_ok_and(|r| r.torn),
             result: result.map(|_| ()),
         }
     }
@@ -778,14 +868,18 @@ impl Mover {
         pair: &mut ContextPair,
         row: &RowView,
         strategy: Strategy,
-    ) -> Result<u64, MoveError> {
+    ) -> Result<SyncMoveResult, MoveError> {
         match strategy {
             Strategy::LibnfsIoUring => self.do_libnfs_copy(pair, row),
-            Strategy::Symlink => self.do_symlink(pair, row).map(|()| 0),
+            Strategy::Symlink => self
+                .do_symlink(pair, row)
+                .map(|()| SyncMoveResult::clean(0)),
             Strategy::HardlinkExisting => Err(MoveError::new(FailurePhase::Hardlink, "EINVAL")),
-            Strategy::Empty => self.do_empty(pair, row).map(|()| 0),
-            Strategy::DirAttrs => self.do_dir_attrs(pair, row).map(|()| 0),
-            Strategy::Skip => Ok(0),
+            Strategy::Empty => self.do_empty(pair, row).map(|()| SyncMoveResult::clean(0)),
+            Strategy::DirAttrs => self
+                .do_dir_attrs(pair, row)
+                .map(|()| SyncMoveResult::clean(0)),
+            Strategy::Skip => Ok(SyncMoveResult::clean(0)),
         }
     }
 
@@ -1060,26 +1154,24 @@ impl Mover {
     /// short copy this is less than `row.size` and the row still
     /// commits `Ok` with a `DowngradeKind::EarlyEof` record.
     ///
-    /// Torn-copy detection is async-path-only for now: this sync path
-    /// has no pre/post source-stat bracket, so a file modified during
-    /// the copy commits here with no `DowngradeKind::TornCopy` record
-    /// and `MoveOutcome::torn` stays `false`. The bucketed async path
-    /// (`pipelined_copy` + `file_mover::classify_copy`) is the one
-    /// that detects and records tears; see
-    /// docs/work-items/MOVER_TORN_COPY_SURFACE.md (F05).
     /// Raw-FH copy path. Same commit contract as `do_libnfs_copy`
     /// (write `.partial`, durable before publish, attrs before rename,
     /// R8 fence check immediately before RENAME) with the RPC budget
     /// collapsed: one amortized READDIRPLUS per source directory, then
-    /// READs + CREATE(attrs) + WRITEs + SETATTR(times) + RENAME for
-    /// each cache hit. Single-chunk files write FILE_SYNC and skip
+    /// GETATTR + READs + GETATTR + CREATE(attrs) + WRITEs + SETATTR(times) +
+    /// RENAME for each cache hit. The GETATTR pair detects source changes on
+    /// the exact filehandle. Single-chunk files write FILE_SYNC and skip
     /// COMMIT; multi-chunk files write UNSTABLE then COMMIT.
     ///
     /// With `direct_commit` the `.partial` + RENAME publish is
     /// skipped: CREATE targets the final name and the R8 fence check
     /// moves to just before CREATE (the new publish point). See the
     /// `MoverConfig::direct_commit` doc for the safety argument.
-    fn do_raw_copy(&self, pair: &mut ContextPair, row: &RowView) -> Result<u64, MoveError> {
+    fn do_raw_copy(
+        &self,
+        pair: &mut ContextPair,
+        row: &RowView,
+    ) -> Result<SyncMoveResult, MoveError> {
         const CHUNK: u64 = 1 << 20; // 1 MiB per READ/WRITE
 
         let src = self.src_path(row);
@@ -1104,6 +1196,26 @@ impl Mover {
         let (mut src_fh, mut src_fh_prefetched) = self
             .resolve_source_child_fh(pair.src(), src_parent, &src_dir, src_name)
             .map_err(|e| raw_move_err(e, FailurePhase::Open))?;
+
+        // Pre-stat the exact NFSv3 filehandle whose bytes will be read. A
+        // READDIRPLUS-prefetched handle can go stale before the copy begins;
+        // resolve it once by name just as the read loop already does.
+        let mut pre = match raw::getattr(pair.src(), &src_fh) {
+            Ok(st) => SourceSnapshot::from(st),
+            Err(error) if src_fh_prefetched && error.tag == "ESTALE" => {
+                self.src_dir_children.disable(src_parent);
+                src_fh = Arc::new(
+                    raw::lookup(pair.src(), &src_dir, src_name)
+                        .map_err(|e| raw_move_err(e, FailurePhase::Open))?,
+                );
+                src_fh_prefetched = false;
+                SourceSnapshot::from(
+                    raw::getattr(pair.src(), &src_fh)
+                        .map_err(|e| raw_move_err(e, FailurePhase::Read))?,
+                )
+            }
+            Err(error) => return Err(raw_move_err(error, FailurePhase::Read)),
+        };
 
         // Same null-attribute downgrades the path-based flow records.
         let policy = self.cfg.policy;
@@ -1167,6 +1279,10 @@ impl Mover {
                             .map_err(|e| raw_move_err(e, FailurePhase::Open))?,
                     );
                     src_fh_prefetched = false;
+                    pre = SourceSnapshot::from(
+                        raw::getattr(pair.src(), &src_fh)
+                            .map_err(|e| raw_move_err(e, FailurePhase::Read))?,
+                    );
                     if off > 0 {
                         raw::setattr(
                             pair.dst(),
@@ -1207,6 +1323,13 @@ impl Mover {
         }
         let written = off;
 
+        // Last source operation in the read bracket. A failure is a row
+        // failure: publishing without the post-stat would make stability
+        // unknowable.
+        let post = SourceSnapshot::from(
+            raw::getattr(pair.src(), &src_fh).map_err(|e| raw_move_err(e, FailurePhase::Read))?,
+        );
+
         if !single_chunk {
             // F09: durable before publish. FILE_SYNC writes already
             // are; UNSTABLE streams need the whole-file COMMIT.
@@ -1224,6 +1347,7 @@ impl Mover {
             self.downgrades
                 .record(row.row_id, &row.path, DowngradeKind::EarlyEof);
         }
+        let torn = self.record_torn_if_changed(row, pre, post);
 
         // Times last (WRITE bumped mtime), one SETATTR for both.
         if let Some((msec, mnsec)) = a.mtime {
@@ -1253,10 +1377,17 @@ impl Mover {
             raw::rename(pair.dst(), &dst_dir, partial_name, dst_name)
                 .map_err(|e| raw_move_err(e, FailurePhase::Rename))?;
         }
-        Ok(written)
+        Ok(SyncMoveResult {
+            bytes_moved: written,
+            torn,
+        })
     }
 
-    fn do_libnfs_copy(&self, pair: &mut ContextPair, row: &RowView) -> Result<u64, MoveError> {
+    fn do_libnfs_copy(
+        &self,
+        pair: &mut ContextPair,
+        row: &RowView,
+    ) -> Result<SyncMoveResult, MoveError> {
         if self.cfg.use_raw_fh {
             return self.do_raw_copy(pair, row);
         }
@@ -1268,6 +1399,13 @@ impl Mover {
         self.ensure_parent_dir(pair.dst(), &dst)?;
 
         let src_fh = ops::open_read(pair.src(), &src)?;
+        let pre = match ops::fstat(pair.src(), &src_fh) {
+            Ok(st) => SourceSnapshot::from(st),
+            Err(error) => {
+                ops::close_quietly(pair.src(), src_fh);
+                return Err(error);
+            }
+        };
         let dst_fh = match ops::create_write(pair.dst(), &dst_partial, 0o600) {
             Ok(fh) => fh,
             Err(e) => {
@@ -1277,6 +1415,14 @@ impl Mover {
         };
 
         let result = stream_copy(pair, &src_fh, &dst_fh, row.row_id, row.size);
+
+        // Complete the bracket immediately after the last source read. If
+        // this fails, do not publish: the mover cannot prove whether the
+        // copied bytes came from one stable source version.
+        let post = match &result {
+            Ok(_) => ops::fstat(pair.src(), &src_fh).map(SourceSnapshot::from),
+            Err(_) => Ok(pre),
+        };
 
         // F09: whole-file NFS COMMIT before the write fh closes and
         // before the rename below — the streaming loop's WRITEs are
@@ -1288,17 +1434,19 @@ impl Mover {
         // failure fails the row through the normal MoveError path
         // (phase Write, error tag `COMMIT:<errno>`); the closes below
         // still run unconditionally for fh hygiene.
-        let commit = match &result {
-            Ok(_) => ops::fsync(pair.dst(), &dst_fh),
-            Err(_) => Ok(()),
+        let commit = match (&result, &post) {
+            (Ok(_), Ok(_)) => ops::fsync(pair.dst(), &dst_fh),
+            _ => Ok(()),
         };
 
         // Apply chown/chmod through the still-open write fh (saves two
         // full-path LOOKUP walks per file); skipped if the copy or
         // COMMIT already failed — the row fails anyway below. utimes
         // runs path-based inside the same plan.
-        let attrs = match (&result, &commit) {
-            (Ok(_), Ok(())) => self.apply_attrs(pair.dst(), &dst_partial, row, Some(&dst_fh)),
+        let attrs = match (&result, &post, &commit) {
+            (Ok(_), Ok(_), Ok(())) => {
+                self.apply_attrs(pair.dst(), &dst_partial, row, Some(&dst_fh))
+            }
             _ => Ok(()),
         };
 
@@ -1306,6 +1454,7 @@ impl Mover {
         let close_dst = ops::close_fh(pair.dst(), dst_fh, FailurePhase::Write);
 
         let written = result?;
+        let post = post?;
         commit?;
         attrs?;
         close_src?;
@@ -1327,6 +1476,7 @@ impl Mover {
             self.downgrades
                 .record(row.row_id, &row.path, DowngradeKind::EarlyEof);
         }
+        let torn = self.record_torn_if_changed(row, pre, post);
 
         // Attributes were applied above through the open fh, before close.
         // R8: last-ditch fence check immediately before the commit-point
@@ -1342,7 +1492,10 @@ impl Mover {
             "commit: rename .partial → final",
         );
         ops::rename(pair.dst(), &dst_partial, &dst)?;
-        Ok(written)
+        Ok(SyncMoveResult {
+            bytes_moved: written,
+            torn,
+        })
     }
 
     // =========================================================================
@@ -2112,6 +2265,86 @@ mod tests {
         }
     }
 
+    fn source_snapshot(
+        size: u64,
+        mtime_sec: i64,
+        mtime_nsec: i32,
+        ctime_sec: i64,
+        ctime_nsec: i32,
+    ) -> SourceSnapshot {
+        SourceSnapshot {
+            size,
+            mtime_sec,
+            mtime_nsec,
+            ctime_sec,
+            ctime_nsec,
+        }
+    }
+
+    #[test]
+    fn sync_torn_classifier_covers_every_stat_field() {
+        let pre = source_snapshot(10, 20, 30, 40, 50);
+        assert_eq!(torn_downgrade(pre, pre), None);
+
+        for post in [
+            source_snapshot(11, 20, 30, 40, 50),
+            source_snapshot(10, 21, 30, 40, 50),
+            source_snapshot(10, 20, 31, 40, 50),
+            source_snapshot(10, 20, 30, 41, 50),
+            source_snapshot(10, 20, 30, 40, 51),
+        ] {
+            assert!(
+                matches!(
+                    torn_downgrade(pre, post),
+                    Some(DowngradeKind::TornCopy { .. })
+                ),
+                "changed source snapshot must be torn: pre={pre:?} post={post:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn sync_torn_record_reaches_the_downgrade_sink() {
+        let mover = build_mover_with_fence(Fence::new());
+        let row = test_row(10, FileTypeTag::Regular);
+        let pre = source_snapshot(10, 20, 30, 40, 50);
+        let post = source_snapshot(10, 20, 31, 40, 50);
+
+        assert!(mover.record_torn_if_changed(&row, pre, post));
+        let body = mover.downgrade_sink().drain_jsonl();
+        let record: migration_core::records::DowngradeRecord =
+            serde_json::from_slice(body.strip_suffix(b"\n").unwrap()).unwrap();
+        assert_eq!(record.row_id, row.row_id);
+        assert_eq!(
+            record.downgrade,
+            DowngradeKind::TornCopy {
+                pre: (10, 20, 40),
+                post: (10, 20, 40),
+            },
+            "nanoseconds trigger detection while the compatible wire payload stays seconds-only",
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_torn_result_reaches_move_outcome() {
+        let mover = build_mover(
+            Arc::new(DummyPairPool) as Arc<dyn LibnfsContextPool>,
+            Fence::new(),
+        );
+        let row = test_row(4096, FileTypeTag::Regular);
+        let outcome = mover
+            .run_with_pair(&row, Strategy::LibnfsIoUring, |_, _| {
+                Ok(SyncMoveResult {
+                    bytes_moved: 4096,
+                    torn: true,
+                })
+            })
+            .await;
+        assert!(outcome.result.is_ok());
+        assert_eq!(outcome.bytes_moved, 4096);
+        assert!(outcome.torn);
+    }
+
     /// F41 acceptance test 5 (red before fix): a Skip row (fifo /
     /// socket / dev) copies nothing and must report 0 bytes while
     /// still counting as a success. Before the fix it reported
@@ -2153,7 +2386,9 @@ mod tests {
         );
         let row = test_row(4096, FileTypeTag::Regular);
         let outcome = mover
-            .run_with_pair(&row, Strategy::LibnfsIoUring, |_, _| Ok(500))
+            .run_with_pair(&row, Strategy::LibnfsIoUring, |_, _| {
+                Ok(SyncMoveResult::clean(500))
+            })
             .await;
         assert!(outcome.result.is_ok(), "EarlyEof stays a committed success");
         assert_eq!(
@@ -2173,7 +2408,9 @@ mod tests {
         );
         let row = test_row(4096, FileTypeTag::Regular);
         let outcome = mover
-            .run_with_pair(&row, Strategy::LibnfsIoUring, |_, _| Ok(4096))
+            .run_with_pair(&row, Strategy::LibnfsIoUring, |_, _| {
+                Ok(SyncMoveResult::clean(4096))
+            })
             .await;
         assert!(outcome.result.is_ok());
         assert_eq!(outcome.bytes_moved, 4096);
@@ -2205,7 +2442,7 @@ mod tests {
         m: &Mover,
         p: &mut ContextPair,
         r: &RowView,
-    ) -> Result<u64, MoveError> {
+    ) -> Result<SyncMoveResult, MoveError> {
         m.do_libnfs_copy(p, r)
     }
 

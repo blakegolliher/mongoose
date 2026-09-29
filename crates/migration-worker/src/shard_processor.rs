@@ -839,12 +839,10 @@ mod tests {
 
     // ---- F05: torn-copy wire-up -----------------------------------
     //
-    // `pipelined_copy` detects a source modified mid-copy; the
-    // classifier (`file_mover::classify_copy`) turns that into a
-    // commit-and-record disposition; `copy_regular` surfaces it on
-    // `MoveOutcome::torn`; and the per-shard summary counts it in
-    // `files_torn`. Drive the real classifier end-to-end here (no
-    // NFS needed) — see docs/work-items/MOVER_TORN_COPY_SURFACE.md.
+    // Both regular-file movers detect a source modified mid-copy and surface
+    // it on `MoveOutcome::torn`; the per-shard summary counts that bit in
+    // `files_torn`. Drive the async classifier end-to-end here (no NFS
+    // needed); mover.rs separately covers the sync/raw outcome plumbing.
 
     #[test]
     fn files_torn_increments_when_classifier_flags_torn() {

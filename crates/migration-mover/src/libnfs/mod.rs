@@ -169,6 +169,10 @@ extern "C" {
     pub fn nfs_chown(nfs: *mut nfs_context, path: *const c_char, uid: c_int, gid: c_int) -> c_int;
     pub fn nfs_fchmod(nfs: *mut nfs_context, nfsfh: *mut nfsfh, mode: c_int) -> c_int;
     pub fn nfs_fchown(nfs: *mut nfs_context, nfsfh: *mut nfsfh, uid: c_int, gid: c_int) -> c_int;
+    /// Stat an already-open filehandle. Torn-copy detection uses the
+    /// handle rather than the path so a concurrent unlink/recreate cannot
+    /// substitute a different inode between the two observations.
+    pub fn nfs_fstat64(nfs: *mut nfs_context, nfsfh: *mut nfsfh, st: *mut nfs_stat_64) -> c_int;
     /// `times` points to an array of two `struct timeval` —
     /// `[atime, mtime]`. Sub-second precision is microseconds; the
     /// nanosecond columns in the index are truncated and the precision

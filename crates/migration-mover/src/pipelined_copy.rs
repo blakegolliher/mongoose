@@ -63,8 +63,9 @@ pub struct FileCopyResult {
     /// (`DowngradeKind::EarlyEof`) or a hard failure
     /// (`require_unchanged_size`).
     pub bytes_copied: u64,
-    /// True iff the source's `(size, mtime, ctime)` differs between
-    /// the pre- and post-stat brackets. Indicates the source was
+    /// True iff the source's `(size, mtime, mtime_nsec, ctime,
+    /// ctime_nsec)` differs between the pre- and post-stat brackets.
+    /// Indicates the source was
     /// modified during the copy; the destination still has *some*
     /// interleaving of pre- and post-versions and the rename still
     /// publishes it. The caller (`file_mover::classify_copy` →
@@ -337,7 +338,19 @@ async fn copy_pipeline_body<'a>(
     // Post-stat. Last thing before return; nothing else races.
     let post = src.fstat(src_fh).await.map_err(read_err)?;
 
-    let torn = (pre.size, pre.mtime, pre.ctime) != (post.size, post.mtime, post.ctime);
+    let torn = (
+        pre.size,
+        pre.mtime,
+        pre.mtime_nsec,
+        pre.ctime,
+        pre.ctime_nsec,
+    ) != (
+        post.size,
+        post.mtime,
+        post.mtime_nsec,
+        post.ctime,
+        post.ctime_nsec,
+    );
 
     let file_hash = hasher.digest128().to_le_bytes();
 

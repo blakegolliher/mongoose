@@ -446,6 +446,17 @@ Choose one approach and document the performance/safety decision:
 - Move mongoose to the async bucketed path after its resource, performance,
   and real-hardware gates pass.
 
+Implementation decision: keep mongoose on its synchronous/raw-FH mover and
+bracket every regular-file read with attributes from the exact source
+filehandle. The raw path uses NFSv3 GETATTR and the path-based fallback uses
+`nfs_fstat64`; both compare size, mtime, and ctime including nanoseconds. This
+adds two source metadata RPCs per non-empty regular file. A failed post-stat
+fails the row before publish; a changed bracket follows the existing
+at-least-once policy and commits with a durable `TornCopy` record so the next
+sync retries it. Software coverage is part of PR-07; the ignored real-NFS
+mutation smoke and raw-mover throughput gate remain mandatory qualification
+before production release.
+
 In either approach:
 
 1. Compare at least size, mtime, and ctime before and after the read.

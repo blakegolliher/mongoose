@@ -75,6 +75,22 @@ pub fn open_read(ctx: &mut NfsContext, path: &[u8]) -> Result<NfsFh, MoveError> 
     Ok(NfsFh::from_raw(fh))
 }
 
+/// Open an existing file for writing without truncating it.
+///
+/// This is primarily useful to the real-NFS torn-copy qualification test,
+/// which must modify the source through a second libnfs context while the
+/// mover reads it. Keeping this wrapper here preserves the same ownership and
+/// error-translation rules as the production read/write helpers.
+pub fn open_write_existing(ctx: &mut NfsContext, path: &[u8]) -> Result<NfsFh, MoveError> {
+    let c = cstr_from_bytes(path)?;
+    let mut fh: *mut nfsfh = std::ptr::null_mut();
+    let rc = unsafe { super::nfs_open(ctx.raw(), c.as_ptr(), libc::O_WRONLY, &mut fh) };
+    if rc < 0 {
+        return Err(err_from_rc(ctx, rc, FailurePhase::Write));
+    }
+    Ok(NfsFh::from_raw(fh))
+}
+
 /// Create a new file for writing. `mode` is the initial mode; the
 /// final mode is set by [`chmod`] at end-of-file. M2 callers create
 /// with `0o600` so the in-flight `.partial` is not world-readable.
@@ -109,6 +125,20 @@ pub fn fsync(ctx: &mut NfsContext, fh: &NfsFh) -> Result<(), MoveError> {
         return Err(e);
     }
     Ok(())
+}
+
+/// Stat an open source filehandle for the torn-copy bracket.
+///
+/// This deliberately uses `nfs_fstat64`, not a path-based stat: the file
+/// being measured must be the same object whose bytes the mover reads even
+/// if its directory entry is concurrently renamed or replaced.
+pub fn fstat(ctx: &mut NfsContext, fh: &NfsFh) -> Result<nfs_stat_64, MoveError> {
+    let mut st = nfs_stat_64::default();
+    let rc = unsafe { super::nfs_fstat64(ctx.raw(), fh.raw(), &mut st as *mut _) };
+    if rc < 0 {
+        return Err(err_from_rc(ctx, rc, FailurePhase::Read));
+    }
+    Ok(st)
 }
 
 pub fn close_fh(ctx: &mut NfsContext, fh: NfsFh, phase: FailurePhase) -> Result<(), MoveError> {
@@ -455,7 +485,9 @@ mod tests {
         // and sink-parser tests too.
         let cases: &[(&str, FailurePhase)] = &[
             ("open_read", FailurePhase::Open),
+            ("open_write_existing", FailurePhase::Write),
             ("create_write", FailurePhase::Write),
+            ("fstat", FailurePhase::Read),
             ("pread", FailurePhase::Read),
             ("pwrite", FailurePhase::Write),
             ("chmod", FailurePhase::Setattr),

@@ -589,3 +589,183 @@ async fn sync_write_fsync_commit_readback() {
     // Best-effort cleanup, same policy as the smokes above.
     let _ = ops::unlink(pair.dst(), &path);
 }
+
+/// PR-07 hardware qualification: exercise the raw synchronous mover selected
+/// by mongoose while another libnfs context repeatedly changes the source.
+/// The source is intentionally large enough to keep the read bracket open.
+///
+/// Optional tuning:
+///
+/// - `VAMOOSE_TEST_TORN_SIZE_MIB` (default 512, minimum 64)
+/// - `VAMOOSE_TEST_TORN_MUTATIONS` (default 500)
+///
+/// The test proves the hardware-dependent half of the contract: the raw
+/// GETATTR bracket sees the change, `MoveOutcome::torn` is set (the worker's
+/// tested accounting path increments `files_torn` from that bit), and the
+/// durable downgrade stream contains `TornCopy` for the row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn raw_sync_mover_detects_source_mutation() {
+    use migration_core::records::{DowngradeKind, DowngradeRecord, FailurePhase};
+    use migration_mover::libnfs::ops;
+    use migration_mover::LibnfsContextPool;
+
+    const MIB: u64 = 1024 * 1024;
+    let size_mib = env::var("VAMOOSE_TEST_TORN_SIZE_MIB")
+        .ok()
+        .map(|s| {
+            s.parse::<u64>()
+                .expect("VAMOOSE_TEST_TORN_SIZE_MIB not numeric")
+        })
+        .unwrap_or(512)
+        .max(64);
+    let mutation_count = env::var("VAMOOSE_TEST_TORN_MUTATIONS")
+        .ok()
+        .map(|s| {
+            s.parse::<usize>()
+                .expect("VAMOOSE_TEST_TORN_MUTATIONS not numeric")
+        })
+        .unwrap_or(500)
+        .max(2);
+    let size = size_mib * MIB;
+
+    let url = dst_url();
+    let suffix = timestamp_suffix();
+    let base = write_dir();
+    let source_root = format!("{base}/torn-copy-{suffix}/source");
+    let dest_root = format!("{base}/torn-copy-{suffix}/dest");
+    let row_path = b"/hot.bin".to_vec();
+    let source_path = format!("{source_root}/hot.bin").into_bytes();
+    let dest_path = format!("{dest_root}/hot.bin").into_bytes();
+
+    // Stage a large source without holding its full contents in memory.
+    let staging_pool = SimplePool::build(&url, &url, DEFAULT_RPC_TIMEOUT_MS).expect("staging pool");
+    let mut staging = staging_pool.acquire().await.expect("staging pair");
+    ops::mkdir_p_for_file(staging.dst(), &source_path).expect("create source parent");
+    let source_fh =
+        ops::create_write(staging.dst(), &source_path, 0o600).expect("create source file");
+    let block = vec![0x5a; MIB as usize];
+    let mut offset = 0u64;
+    while offset < size {
+        let mut block_offset = 0usize;
+        while block_offset < block.len() {
+            let n = ops::pwrite(
+                staging.dst(),
+                &source_fh,
+                offset + block_offset as u64,
+                &block[block_offset..],
+            )
+            .expect("stage source write");
+            assert!(n > 0, "source staging write made no progress");
+            block_offset += n;
+        }
+        offset += MIB;
+    }
+    ops::fsync(staging.dst(), &source_fh).expect("commit staged source");
+    ops::close_fh(staging.dst(), source_fh, FailurePhase::Write).expect("close staged source");
+    drop(staging);
+
+    let cfg = MoverConfig {
+        source_url: url.clone(),
+        dest_url: url.clone(),
+        source_root,
+        dest_root,
+        policy: AttrPolicy::from_options(&MigrationOptions::default()),
+        inflight: InflightProfile::default(),
+        require_chown: false,
+        require_unchanged_size: false,
+        use_raw_fh: true,
+        direct_commit: false,
+        rpc_timeout_ms: DEFAULT_RPC_TIMEOUT_MS,
+        same_server: true,
+    };
+    let downgrades = DowngradeSink::new();
+    downgrades.set_current_shard("torn-copy-hardware.parquet");
+    let mover_pool = SimplePool::build(&url, &url, DEFAULT_RPC_TIMEOUT_MS).expect("mover pool");
+    let mover = Mover::new(
+        cfg,
+        mover_pool,
+        "test-host",
+        downgrades.clone(),
+        Fence::new(),
+    );
+    let row = RowView {
+        row_id: 7,
+        path: row_path.clone(),
+        size,
+        mtime_sec: None,
+        mtime_nsec: None,
+        atime_sec: None,
+        atime_nsec: None,
+        mode: 0o600,
+        uid: None,
+        gid: None,
+        nlink: Some(1),
+        inode: None,
+        fsid: None,
+        xattr_blob: None,
+        symlink_target: None,
+        file_type: FileTypeTag::Regular,
+    };
+
+    // A separate mounted pair is essential: libnfs contexts are single-user,
+    // and this write must overlap the mover's read rather than queue behind it.
+    let mutation_pool =
+        SimplePool::build(&url, &url, DEFAULT_RPC_TIMEOUT_MS).expect("mutation pool");
+    let mut mutation_pair = mutation_pool.acquire().await.expect("mutation pair");
+    let mutation_path = source_path.clone();
+    let mutate = async move {
+        // Give the mover time to resolve the raw fh and take its pre-stat. The
+        // repeated writes make the test tolerant of ordinary RPC jitter.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::task::spawn_blocking(move || {
+            let fh = ops::open_write_existing(mutation_pair.src(), &mutation_path)
+                .expect("open source for concurrent mutation");
+            let center = size / 2;
+            for i in 0..mutation_count {
+                let byte = [(i & 0xff) as u8];
+                let n = ops::pwrite(mutation_pair.src(), &fh, center, &byte)
+                    .expect("concurrent source mutation");
+                assert_eq!(n, 1, "source mutation must write one byte");
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            ops::fsync(mutation_pair.src(), &fh).expect("commit source mutations");
+            ops::close_fh(mutation_pair.src(), fh, FailurePhase::Write)
+                .expect("close mutated source");
+        })
+        .await
+        .expect("mutation task panicked");
+    };
+
+    let (outcome, ()) = tokio::join!(mover.move_one(&row), mutate);
+    assert!(
+        outcome.result.is_ok(),
+        "raw sync move failed: {:?}",
+        outcome.result
+    );
+    assert!(
+        outcome.torn,
+        "concurrent source writes must mark the copy torn"
+    );
+    assert_eq!(outcome.bytes_moved, size);
+
+    let records: Vec<DowngradeRecord> = downgrades
+        .drain_jsonl()
+        .split(|&b| b == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).expect("valid downgrade JSONL"))
+        .collect();
+    assert!(
+        records.iter().any(|record| {
+            record.row_id == row.row_id
+                && matches!(record.downgrade, DowngradeKind::TornCopy { .. })
+        }),
+        "torn copy must emit a durable TornCopy record: {records:?}",
+    );
+
+    // Best-effort cleanup. Preserve artifacts after a failure for diagnosis.
+    let cleanup_pool = SimplePool::build(&url, &url, DEFAULT_RPC_TIMEOUT_MS).expect("cleanup pool");
+    let mut cleanup = cleanup_pool.acquire().await.expect("cleanup pair");
+    let _ = ops::unlink(cleanup.dst(), &source_path);
+    let _ = ops::unlink(cleanup.dst(), &dest_path);
+}

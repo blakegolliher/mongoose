@@ -314,10 +314,12 @@ pub enum DowngradeKind {
     /// post-versions. The file is still committed — at-least-once
     /// semantics, the source remains intact — and this record is the
     /// operator-visible trace of the tear. `pre`/`post` are the
-    /// bracket triples `(size, mtime_sec, ctime_sec)`. Async-path
-    /// only for now; the sync mover has no stat bracket. A future
-    /// multi-pass driver (MULTI_PASS_MOVER.md) would re-copy torn
-    /// rows; until then this record is all the remediation there is.
+    /// bracket triples `(size, mtime_sec, ctime_sec)`. Nanoseconds also
+    /// participate in detection, but the established wire payload remains
+    /// seconds-only for compatibility. Both the synchronous/raw-FH mover and
+    /// the bucketed async mover emit this record. Mongoose's next sync forces
+    /// every recorded torn row back into the delta until a clean copy
+    /// succeeds.
     TornCopy {
         pre: (u64, i64, i64),
         post: (u64, i64, i64),
