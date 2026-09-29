@@ -117,3 +117,6 @@ PASS: replacement license and help commands run successfully
 EOF
 mv "$evidence_tmp" "$evidence"
 echo "LGPL relink verification PASS: $evidence"
+
+# Negative test for PR-11A: deliberate ShellCheck finding (SC2086).
+echo $UNQUOTED_FOR_NEGATIVE_TEST
