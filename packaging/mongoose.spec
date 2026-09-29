@@ -2,6 +2,11 @@
 # via the rpmbuild SOURCES dir; this spec only stages and packages it.
 %define debug_package %{nil}
 %define _build_id_links none
+# The release compliance gate requires every package to contain the exact
+# prebuilt release binary.  RPM's default brp strip hooks would rewrite it.
+%define __brp_strip %{nil}
+%define __brp_strip_static_archive %{nil}
+%define __brp_strip_comment_note %{nil}
 
 Name:           mongoose
 Version:        %{pkg_version}

@@ -88,6 +88,9 @@ need_text docs/LGPL_COMPLIANCE.md 'No mongoose binary containing libnfs may be p
 need_text Makefile 'check-lgpl-compliance\.sh --release-dir'
 need_text Makefile 'build-lgpl-release-materials\.sh'
 need_text crates/migration-mover/build.rs 'rustc-link-lib=static=nfs'
+need_text packaging/mongoose.spec '^%define __brp_strip %\{nil\}$'
+need_text packaging/mongoose.spec '^%define __brp_strip_static_archive %\{nil\}$'
+need_text packaging/mongoose.spec '^%define __brp_strip_comment_note %\{nil\}$'
 need_text packaging/licenses/LGPL-2.1.txt 'GNU (LESSER|LIBRARY) GENERAL PUBLIC LICENSE'
 
 if test "$mode" = "repo"; then
