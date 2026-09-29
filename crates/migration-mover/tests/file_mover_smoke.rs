@@ -148,6 +148,7 @@ async fn async_bucketed_mover_copies_regular_file_end_to_end() {
         use_raw_fh: false,
         direct_commit: false,
         rpc_timeout_ms: DEFAULT_RPC_TIMEOUT_MS,
+        same_server: true,
     });
 
     let downgrades = DowngradeSink::new();
@@ -290,6 +291,7 @@ async fn hardlink_replay_is_idempotent() {
         use_raw_fh: false,
         direct_commit: false,
         rpc_timeout_ms: DEFAULT_RPC_TIMEOUT_MS,
+        same_server: true,
     });
 
     let downgrades = DowngradeSink::new();
@@ -444,6 +446,7 @@ async fn symlink_replay_is_idempotent() {
         use_raw_fh: false,
         direct_commit: false,
         rpc_timeout_ms: DEFAULT_RPC_TIMEOUT_MS,
+        same_server: true,
     });
 
     let downgrades = DowngradeSink::new();

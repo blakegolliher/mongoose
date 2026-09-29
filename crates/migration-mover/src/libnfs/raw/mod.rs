@@ -154,8 +154,19 @@ fn nfsstat_tag(status: u32) -> &'static str {
 }
 
 /// What a completed op handed back from its callback.
+/// Server-side identity of one object, from post-op attributes:
+/// `(fsid, fileid)` is unique within a server. `ftype` is the NFS3
+/// `ftype3` (1 = regular, 2 = directory, ...).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Ident {
+    pub fsid: u64,
+    pub fileid: u64,
+    pub ftype: u32,
+}
+
 enum Out {
     Fh(Fh),
+    Lookup { fh: Fh, ident: Option<Ident> },
     Readdirplus(ReaddirplusPage),
     Read { count: u32, eof: bool },
     Write { count: u32 },
@@ -353,6 +364,67 @@ unsafe extern "C" fn cb_lookup(
         if res.status == b::NFS3_OK {
             slot.out = Some(Out::Fh(copy_fh3(&res.LOOKUP3res_u.resok.object)));
         }
+    }
+}
+
+unsafe extern "C" fn cb_lookup_ident(
+    rpc: *mut b::rpc_context,
+    status: c_int,
+    data: *mut c_void,
+    pd: *mut c_void,
+) {
+    let slot = &mut *(pd as *mut Slot);
+    if let Some(data) = slot.begin(rpc, status, data) {
+        let res = &*(data as *const b::LOOKUP3res);
+        slot.nfs_status = res.status;
+        if res.status == b::NFS3_OK {
+            let ok = &res.LOOKUP3res_u.resok;
+            let ident = if ok.obj_attributes.attributes_follow != 0 {
+                let a = ok.obj_attributes.post_op_attr_u.attributes;
+                Some(Ident {
+                    fsid: a.fsid,
+                    fileid: a.fileid,
+                    ftype: a.type_,
+                })
+            } else {
+                None
+            };
+            slot.out = Some(Out::Lookup {
+                fh: copy_fh3(&ok.object),
+                ident,
+            });
+        }
+    }
+}
+
+/// LOOKUP `name` in `dir_fh`; returns the child's filehandle plus its
+/// identity when the server attached post-op attributes (they may
+/// legally omit them). `.` and `..` are valid names: `..` at an
+/// export root returns the root itself on most servers.
+pub fn lookup_ident(
+    nfs: &mut NfsContext,
+    dir_fh: &[u8],
+    name: &[u8],
+) -> Result<(Fh, Option<Ident>), RawError> {
+    let cname = cstring(name, "LOOKUP")?;
+    let mut slot = Slot::new();
+    let mut args = b::LOOKUP3args {
+        what: b::diropargs3 {
+            dir: fh3(dir_fh),
+            name: cname.as_ptr() as *mut c_char,
+        },
+    };
+    issue!(nfs, &slot, "LOOKUP", {
+        b::rpc_nfs3_lookup_task(
+            rpc_of(nfs),
+            Some(cb_lookup_ident),
+            &mut args,
+            &mut slot as *mut Slot as *mut c_void,
+        )
+    });
+    match slot.finish("LOOKUP")? {
+        Out::Lookup { fh, ident } => Ok((fh, ident)),
+        _ => unreachable!("LOOKUP ident slot holds Lookup"),
     }
 }
 

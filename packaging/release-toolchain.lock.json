@@ -3,5 +3,10 @@
   "rustc": "1.98.0",
   "cargo": "1.98.0",
   "cargo_zigbuild": "0.20.1",
-  "zig": "0.16.0"
+  "zig": "0.16.0",
+  "cmake": "3.28.3",
+  "binutils": "2.42",
+  "gnu_tar": "1.35",
+  "gzip": "1.12",
+  "cargo_about": "0.9.1"
 }

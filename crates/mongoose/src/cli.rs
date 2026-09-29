@@ -1,4 +1,4 @@
-//! Command-line surface: `mongoose copy | sync`.
+//! Command-line surface: `mongoose copy | sync | licenses`.
 //!
 //! Deliberately small. The engine underneath has many knobs (context
 //! pairs, per-size-class inflight limits, raw-FH vs path-based copy,
@@ -25,8 +25,8 @@ pub const MAX_PARALLEL: u32 = 100;
     long_about = "mongoose copies everything under one NFS path to another NFS path from a\n\
                   single host, speaking NFSv3 directly (nothing is mounted, nothing else is\n\
                   installed). `copy` does the initial full copy; `sync` copies whatever\n\
-                  changed on the source since the last pass and, with --cutover, verifies\n\
-                  that the two trees match.\n\n\
+                  changed on the source since the last pass and, with --cutover, reads the\n\
+                  destination back to verify that the two trees match.\n\n\
                   Run as root. Re-running a command with the same --work-dir resumes it."
 )]
 pub struct Cli {
@@ -55,6 +55,21 @@ pub enum Command {
     /// Repeat while the source is live; finish with --cutover once
     /// source writers are stopped.
     Sync(SyncArgs),
+    /// Show license, source, and relinking information for components
+    /// included in the release binary.
+    Licenses(LicenseArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct LicenseArgs {
+    /// Component whose complete license information should be printed.
+    #[arg(long, value_enum)]
+    pub component: LicenseComponent,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LicenseComponent {
+    Libnfs,
 }
 
 #[derive(Args, Debug)]
@@ -72,8 +87,11 @@ pub struct CopyArgs {
     #[arg(long, value_name = "DIR")]
     pub work_dir: PathBuf,
 
-    /// Directory name pattern to skip, e.g. .snapshot (repeatable).
-    /// Remembered in the work dir, so later syncs skip it too.
+    /// Skip every directory whose name matches this glob, and
+    /// everything under it: `.snapshot`, `.zfs`, `*.tmp`. Matched
+    /// against the name only, never the path. Repeatable. Remembered
+    /// in the work dir, so every later sync and the cutover skip the
+    /// same directories.
     #[arg(long, value_name = "GLOB")]
     pub exclude: Vec<String>,
 
@@ -87,8 +105,9 @@ pub struct SyncArgs {
     #[arg(long, value_name = "DIR")]
     pub work_dir: PathBuf,
 
-    /// Final pass: source writers must be stopped. Fails if anything
-    /// still differs, so a clean exit means the trees have converged.
+    /// Final pass: source writers must be stopped. Copies nothing.
+    /// Rescans both trees and reads every file back from both servers;
+    /// fails if anything differs, so a clean exit means the trees match.
     #[arg(long)]
     pub cutover: bool,
 
@@ -214,5 +233,17 @@ mod tests {
         assert_eq!(cli.verbose, 2);
         let cli = Cli::try_parse_from(["mongoose", "sync", "--work-dir", "/w"]).unwrap();
         assert_eq!(cli.verbose, 0, "compact by default");
+    }
+
+    #[test]
+    fn libnfs_license_command_is_offline_and_explicit() {
+        let cli = Cli::try_parse_from(["mongoose", "licenses", "--component", "libnfs"])
+            .expect("documented license command should parse");
+        let Command::Licenses(args) = cli.command else {
+            panic!("expected licenses");
+        };
+        assert_eq!(args.component, LicenseComponent::Libnfs);
+        assert!(Cli::try_parse_from(["mongoose", "licenses"]).is_err());
+        assert!(Cli::try_parse_from(["mongoose", "licenses", "--component", "unknown"]).is_err());
     }
 }

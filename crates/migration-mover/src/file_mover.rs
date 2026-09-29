@@ -41,7 +41,7 @@ use crate::bucketed_pool::BucketedAsyncPool;
 use crate::downgrade::DowngradeSink;
 use crate::error::MoveError;
 use crate::libnfs::asyncio::{AsyncNfsContext, Flags};
-use crate::mover::check_self_target;
+use crate::mover::{abs_server_path, check_self_target, export_prefix};
 use crate::paths::{join_root, partial_path};
 use crate::pipelined_copy::{pipelined_copy, FileCopyResult};
 use crate::strategy::{self, Strategy, StrategyContext};
@@ -167,6 +167,9 @@ pub struct AsyncBucketedFileMover {
     /// mkdir chain and nothing removes destination dirs during a run.
     dirs_known: Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>,
     dir_locks: Arc<AsyncDirLocks>,
+    /// Export prefixes for the server-absolute self-target check.
+    src_export: Arc<[u8]>,
+    dst_export: Arc<[u8]>,
 }
 
 impl AsyncBucketedFileMover {
@@ -183,6 +186,8 @@ impl AsyncBucketedFileMover {
         host_id: impl Into<Arc<str>>,
         downgrades: DowngradeSink,
     ) -> Self {
+        let src_export: Arc<[u8]> = export_prefix(&cfg.source_url).into();
+        let dst_export: Arc<[u8]> = export_prefix(&cfg.dest_url).into();
         Self {
             pool,
             sync,
@@ -193,6 +198,8 @@ impl AsyncBucketedFileMover {
             downgrades,
             dirs_known: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
             dir_locks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            src_export,
+            dst_export,
         }
     }
 
@@ -269,13 +276,14 @@ impl AsyncBucketedFileMover {
         let dst = join_root(self.cfg.dest_root.as_bytes(), &row.path);
         let dst_partial = partial_path(&dst, &self.host_id, self.pid)?;
 
-        check_self_target(
-            &self.cfg.source_url,
-            &self.cfg.dest_url,
-            &src,
-            &dst,
-            &dst_partial,
-        )?;
+        if self.cfg.same_server {
+            check_self_target(
+                true,
+                &abs_server_path(&self.src_export, &src),
+                &abs_server_path(&self.dst_export, &dst),
+                &abs_server_path(&self.dst_export, &dst_partial),
+            )?;
+        }
 
         let (src_ctx, dst_ctx, cfg) = self.pool.pair_for_size(row.size);
 

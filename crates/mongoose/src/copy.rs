@@ -15,8 +15,11 @@
 //! idempotent: `.partial` + rename).
 
 use crate::cli::Tuning;
-use crate::manifest::{self, LocalManifest};
-use crate::progress::{write_shard_jsonl, CopyProgress};
+use crate::endpoint;
+use crate::identity;
+use crate::manifest::{self, ExpectedIdentity, LocalManifest, ManifestKind};
+use crate::progress::{persist_shard_results_then, write_shard_jsonl, CopyProgress};
+use crate::stop::{StopReason, StopState};
 use crate::util::raise_fd_limit;
 use crate::workdir::WorkDir;
 use anyhow::{Context, Result};
@@ -31,7 +34,6 @@ use migration_worker::shard_processor::ShardProcessor;
 use migration_worker::throughput::ThroughputCounter;
 use std::path::Path;
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 
 /// How often the ticker logs live counters while a shard runs.
 const TICK_SECS: u64 = 15;
@@ -47,6 +49,8 @@ pub struct CopySummary {
     /// Stopped by SIGINT/SIGTERM at a batch boundary; re-run
     /// `mongoose copy` to resume from the interrupted shard.
     pub interrupted: bool,
+    /// First handled signal, when interrupted.
+    pub stop_reason: Option<StopReason>,
 }
 
 /// In-flight file limits for a `--parallel` level, scaled from the
@@ -72,6 +76,7 @@ pub fn mover_params(
     tuning: &Tuning,
     require_chown: bool,
     host_id: String,
+    same_server: bool,
 ) -> MoverParams {
     MoverParams {
         source_url: m.source.url.clone(),
@@ -90,11 +95,13 @@ pub fn mover_params(
         require_unchanged_size: false,
         inflight: inflight_for(tuning),
         host_id,
+        same_server,
     }
 }
 
 pub async fn run(work_dir: &Path, tuning: &Tuning) -> Result<CopySummary> {
-    run_manifest(work_dir, tuning, "manifest.json").await
+    let stop = StopState::install()?;
+    run_manifest_with_stop(work_dir, tuning, "manifest.json", stop).await
 }
 
 /// [`run`] against a named manifest inside the work dir. `mongoose
@@ -105,17 +112,62 @@ pub async fn run_manifest(
     tuning: &Tuning,
     manifest_name: &str,
 ) -> Result<CopySummary> {
-    let wd = WorkDir::new(work_dir);
-    let m = manifest::load_file(&wd.root().join(manifest_name))?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "no {manifest_name} under {}; run `mongoose copy` first",
-            wd.root().display()
-        )
-    })?;
+    let stop = StopState::install()?;
+    run_manifest_with_stop(work_dir, tuning, manifest_name, stop).await
+}
 
-    // The manifest was overlap-checked at prepare time; check again in
-    // case it was hand-edited.
-    migration_core::overlap::check(&m.source, &m.dest)?;
+pub(crate) async fn run_manifest_with_stop(
+    work_dir: &Path,
+    tuning: &Tuning,
+    manifest_name: &str,
+    stop: StopState,
+) -> Result<CopySummary> {
+    let wd = WorkDir::new(work_dir);
+    anyhow::ensure!(
+        Path::new(manifest_name)
+            .file_name()
+            .is_some_and(|n| n == manifest_name),
+        "manifest name must be a single file name"
+    );
+    let kind = if manifest_name == crate::sync::DELTA_MANIFEST {
+        ManifestKind::Delta
+    } else {
+        ManifestKind::Canonical
+    };
+    let expected = if kind == ManifestKind::Delta {
+        let root = wd
+            .root()
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(wd.root());
+        let root_wd = WorkDir::new(root);
+        let root_manifest = manifest::load(&root_wd)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "delta manifest {} has no validated root manifest",
+                wd.root().display()
+            )
+        })?;
+        Some(ExpectedIdentity::from(&root_manifest))
+    } else {
+        None
+    };
+    let m = manifest::load_validated(&wd, &wd.root().join(manifest_name), expected.as_ref(), kind)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no {manifest_name} under {}; run `mongoose copy` first",
+                wd.root().display()
+            )
+        })?;
+
+    // Endpoint separation, re-proved on every run from the recorded
+    // manifest (which may have been hand-edited): layers 1 and 2 —
+    // canonical spelling and name resolution — before anything is
+    // mounted; layer 3, the servers' own view, once the pool is up
+    // and before the first destination write.
+    let src_url = endpoint::parse("manifest source.url", &m.source.url)?;
+    let dst_url = endpoint::parse("manifest dest.url", &m.dest.url)?;
+    endpoint::check_overlap(&src_url, &dst_url)?;
+    let names = endpoint::check_overlap_resolved(&src_url, &dst_url)?;
 
     // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } != 0 {
@@ -137,18 +189,21 @@ pub async fn run_manifest(
         tuning.parallel,
     );
 
-    // Stop token: SIGINT/SIGTERM finishes the batch in flight and
-    // leaves the shard at the boundary. A second signal is logged and
-    // ignored (SIGKILL is the escape hatch).
-    let stop = CancellationToken::new();
-    spawn_signal_listener(stop.clone());
-
     let host_id = hostname();
     let fence = Fence::new();
     let downgrades = DowngradeSink::new();
     let failures = FailureSink::new();
-    let params = mover_params(&m, tuning, cap_chown, host_id);
+    let params = mover_params(&m, tuning, cap_chown, host_id, names.may_be_same_server());
     let built = mover_factory::build(&params, downgrades.clone(), fence.clone()).await?;
+    let separation = identity::prove_separation(
+        &built.pool,
+        &src_url,
+        &dst_url,
+        &names,
+        &full_index_shards(&wd, &m)?,
+    )
+    .await?;
+    println!("  endpoints: {}\n", separation.evidence);
     let throughput = ThroughputCounter::new();
     let inflight = InflightLimiter::new(&params.inflight);
     let live = Arc::new(LivePending::default());
@@ -175,28 +230,20 @@ pub async fn run_manifest(
         files_torn: progress.files_torn,
         bytes_moved: progress.bytes_moved,
         interrupted: false,
+        stop_reason: None,
     };
 
     for shard in &m.shards {
         if progress.is_completed(&shard.path) {
             continue;
         }
-        if stop.is_cancelled() {
+        if stop.token().is_cancelled() {
             summary.interrupted = true;
+            summary.stop_reason = stop.reason();
             break;
         }
+        manifest::verify_shard_integrity(&wd, shard)?;
         let parquet = wd.shard_path(&shard.path);
-        let size = std::fs::metadata(&parquet)
-            .map(|md| md.len())
-            .with_context(|| format!("shard {} is missing", parquet.display()))?;
-        if size != shard.bytes {
-            anyhow::bail!(
-                "shard {} is {size} bytes; manifest says {} — the index changed since \
-                 prepare, refusing to copy from it",
-                parquet.display(),
-                shard.bytes
-            );
-        }
 
         println!("shard {} ({} rows)", shard.file_name(), shard.rows);
         downgrades.set_current_shard(shard.file_name());
@@ -215,7 +262,7 @@ pub async fn run_manifest(
             fsid_fallback_warned: false,
             emitter: EventEmitter::disabled(),
             run_control: None,
-            stop: stop.clone(),
+            stop: stop.token(),
         };
         let outcome = processor
             .process(&parquet)
@@ -225,16 +272,32 @@ pub async fn run_manifest(
         // Drain this shard's failure/downgrade records to local JSONL
         // before the shard is marked complete, so an interruption
         // between the two never loses records.
-        if let Some(p) =
-            write_shard_jsonl(&wd.failures_dir(), shard.stem(), &failures.drain_jsonl())?
-        {
-            println!("  failures  -> {}", p.display());
-        }
-        if let Some(p) = write_shard_jsonl(
+        let failures_jsonl = failures.drain_jsonl();
+        let downgrades_jsonl = downgrades.drain_jsonl();
+        let (failure_path, downgrade_path, ()) = persist_shard_results_then(
+            &wd.failures_dir(),
             &wd.downgrades_dir(),
             shard.stem(),
-            &downgrades.drain_jsonl(),
-        )? {
+            &failures_jsonl,
+            &downgrades_jsonl,
+            write_shard_jsonl,
+            || {
+                if !outcome.interrupted {
+                    progress.files_ok += outcome.files_ok;
+                    progress.files_failed += outcome.files_failed;
+                    progress.files_torn += outcome.files_torn;
+                    progress.bytes_moved += outcome.bytes_moved;
+                    progress.throughput_mb_s_1m = throughput.sample_mb_s(60);
+                    progress.completed_shards.push(shard.path.clone());
+                    progress.write(&wd)?;
+                }
+                Ok(())
+            },
+        )?;
+        if let Some(p) = failure_path {
+            println!("  failures  -> {}", p.display());
+        }
+        if let Some(p) = downgrade_path {
             println!("  downgrades -> {}", p.display());
         }
 
@@ -256,18 +319,12 @@ pub async fn run_manifest(
                 outcome.rows_total
             );
             summary.interrupted = true;
+            summary.stop_reason = stop.reason();
             progress.write(&wd)?;
             break;
         }
 
-        progress.files_ok += outcome.files_ok;
-        progress.files_failed += outcome.files_failed;
-        progress.files_torn += outcome.files_torn;
-        progress.bytes_moved += outcome.bytes_moved;
-        progress.throughput_mb_s_1m = throughput.sample_mb_s(60);
-        progress.completed_shards.push(shard.path.clone());
         summary.shards_done += 1;
-        progress.write(&wd)?;
         println!(
             "  done: {} ok, {} failed, {} bytes",
             outcome.files_ok, outcome.files_failed, outcome.bytes_moved
@@ -318,42 +375,28 @@ pub async fn run_manifest(
     Ok(summary)
 }
 
+/// Every shard of this work dir's full index (`manifest.json`), for
+/// the identity check's search of the source tree. A delta manifest
+/// is a subset; the full index sits beside it. Falls back to the
+/// manifest being copied.
+fn full_index_shards(wd: &WorkDir, m: &LocalManifest) -> Result<Vec<std::path::PathBuf>> {
+    let expected = ExpectedIdentity::from(m);
+    let full = manifest::load_validated(
+        wd,
+        &wd.manifest_json(),
+        Some(&expected),
+        ManifestKind::Canonical,
+    )?;
+    let shards = full.as_ref().map(|f| &f.shards).unwrap_or(&m.shards);
+    Ok(shards.iter().map(|s| wd.shard_path(&s.path)).collect())
+}
+
 fn hostname() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname")
         .map(|s| s.trim().to_string())
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "mongoose".to_string())
-}
-
-fn spawn_signal_listener(stop: CancellationToken) {
-    tokio::spawn(async move {
-        let mut term =
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(error = ?e, "cannot install SIGTERM handler");
-                    return;
-                }
-            };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
-        }
-        tracing::info!("stop requested; finishing the batch in flight, then leaving the shard");
-        stop.cancel();
-        // Further signals: log and keep going; the batch always
-        // finishes (SIGKILL is the escape hatch).
-        loop {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {}
-                _ = term.recv() => {}
-            }
-            tracing::warn!(
-                "already stopping; the batch in flight will finish (use SIGKILL to abandon it)"
-            );
-        }
-    });
 }
 
 fn spawn_ticker(
@@ -383,7 +426,11 @@ fn spawn_ticker(
 mod tests {
     use super::*;
     use crate::manifest::{LocalShard, MANIFEST_FORMAT_VERSION};
+    use arrow::array::{ArrayRef, UInt8Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
     use migration_core::records::{Endpoint, EndpointKind, MigrationOptions};
+    use std::sync::Arc;
 
     fn tuning() -> Tuning {
         Tuning { parallel: 24 }
@@ -416,9 +463,37 @@ mod tests {
         }
     }
 
+    fn persist_manifest(wd: &WorkDir, m: &mut LocalManifest) {
+        std::fs::create_dir_all(wd.canonical_dir()).unwrap();
+        let shard = wd.shard_path(&m.shards[0].path);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::UInt8,
+            false,
+        )]));
+        let values: ArrayRef = Arc::new(UInt8Array::from(vec![1]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![values]).unwrap();
+        let mut writer = parquet::arrow::ArrowWriter::try_new(
+            std::fs::File::create(&shard).unwrap(),
+            schema,
+            None,
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        m.shards[0].bytes = std::fs::metadata(&shard).unwrap().len();
+        m.total_bytes = m.shards[0].bytes;
+        m.shards[0].sha256 = crate::util::sha256_file(&shard).unwrap();
+        crate::util::write_json_atomic(&wd.manifest_json(), m).unwrap();
+    }
+
     #[test]
     fn mover_params_project_manifest_and_tuning() {
-        let p = mover_params(&local_manifest(), &tuning(), true, "h".into());
+        let p = mover_params(&local_manifest(), &tuning(), true, "h".into(), true);
+        assert!(
+            p.same_server,
+            "the identity verdict arms the per-file check"
+        );
         assert_eq!(p.source_url, "nfs://s/e");
         assert_eq!(p.dest_url, "nfs://d/e");
         assert_eq!(p.source_root, "/data");
@@ -478,8 +553,57 @@ mod tests {
         m.dest.url = "nfs://h/export".into();
         m.source.root = "/".into();
         m.dest.root = "/dst".into();
-        crate::util::write_json_atomic(&wd.manifest_json(), &m).unwrap();
+        persist_manifest(&wd, &mut m);
         let err = run(dir.path(), &tuning()).await.unwrap_err();
         assert!(format!("{err:#}").contains("overlap"), "{err:#}");
+    }
+
+    /// A hand-edited manifest whose two URLs spell one server two
+    /// ways is refused by the same layers as the CLI flags, before
+    /// any pool mounts (these hosts do not exist; a mount would fail
+    /// with a different error).
+    #[tokio::test]
+    async fn copy_rejects_aliased_manifest_endpoints_before_mounting() {
+        for (src, dst, how) in [
+            (
+                "nfs://H.Example.com/export",
+                "nfs://h.example.com./export/backup",
+                "same host name",
+            ),
+            (
+                "nfs://h.example.com:2049/export",
+                "nfs://h.example.com/export?version=3",
+                "same host name",
+            ),
+            (
+                "nfs://localhost/export",
+                "nfs://127.0.0.1/export/sub",
+                "both names resolve to",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let wd = WorkDir::new(dir.path());
+            let mut m = local_manifest();
+            m.source.url = src.into();
+            m.dest.url = dst.into();
+            m.source.root = "/".into();
+            m.dest.root = "/".into();
+            persist_manifest(&wd, &mut m);
+            let err = run(dir.path(), &tuning()).await.unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains("overlap"), "{src} vs {dst}: {msg}");
+            assert!(msg.contains(how), "{src} vs {dst}: {msg}");
+        }
+    }
+
+    #[tokio::test]
+    async fn copy_rejects_a_malformed_manifest_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let wd = WorkDir::new(dir.path());
+        let mut m = local_manifest();
+        m.dest.url = "new-server:/export".into();
+        persist_manifest(&wd, &mut m);
+        let err = run(dir.path(), &tuning()).await.unwrap_err();
+        assert!(format!("{err:#}").contains("manifest dest.url"), "{err:#}");
     }
 }

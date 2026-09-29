@@ -16,14 +16,37 @@
 //! set**: forced DIRTY even when their tuple matches, so they retry
 //! every pass until they succeed. Deletions are recorded to
 //! `classify/deleted.jsonl` and never propagated to the destination.
+//!
+//! ## `--cutover`
+//!
+//! Two gates, both of which must pass before the baseline advances:
+//!
+//! 1. **Source quiescence** — the classifier finds nothing to copy
+//!    and no deletions, i.e. the source has not changed since the
+//!    last sync and nothing is pending. This proves the last sync
+//!    caught everything; it says nothing about the destination.
+//! 2. **Destination verification** ([`crate::verify`]) — the
+//!    destination is scanned with the same walker and excludes, joined
+//!    against the source index, and every file and symlink is read
+//!    back from both servers. A clean result is the statement "the
+//!    trees match" that the README makes for a clean exit.
+//!
+//! A failed verification leaves the previous baseline untouched, keeps
+//! the pass dir as evidence (moved to `passes/pass-NNNN-failed-<utc>/`,
+//! with `verify.json` and `verify/mismatches.jsonl`), and fails the
+//! command. An interrupted verification resumes on the next run.
 
-use crate::cli::SyncArgs;
+use crate::cli::{SyncArgs, Tuning};
 use crate::copy::{self, CopySummary};
-use crate::manifest::{self, LocalManifest};
+use crate::endpoint::{self, NameEvidence};
+use crate::identity;
+use crate::manifest::{self, ExpectedIdentity, LocalManifest, ManifestKind};
 use crate::progress::CopyProgress;
 use crate::scan::{self, ScanParams};
+use crate::stop::{StopReason, StopState};
 use crate::util::{raise_fd_limit, read_json_opt, write_json_atomic};
-use crate::workdir::{RunSpec, WorkDir};
+use crate::verify::{self, content::LibnfsChecker, VerifyParams, VerifyReport, VerifyStatus};
+use crate::workdir::{job_excludes, WorkDir};
 use anyhow::{Context, Result};
 use base64::Engine;
 use migration_core::prepare_tools as tools;
@@ -73,8 +96,17 @@ pub struct SyncOutcome {
     pub pass: u32,
     pub counts: Option<ClassifyCounts>,
     pub copy: Option<CopySummary>,
-    /// Nothing to copy: the trees matched (modulo recorded deletions).
+    /// Nothing to copy: the source is unchanged since the last pass
+    /// (modulo recorded deletions). Not a statement about the
+    /// destination — see `verification`.
     pub in_sync: bool,
+    /// The cutover verification report, when `--cutover` ran it.
+    pub verification: Option<VerifyReport>,
+    /// Stopped by SIGINT/SIGTERM (copy or verification); re-run to
+    /// resume this pass.
+    pub interrupted: bool,
+    /// First handled signal, when interrupted.
+    pub stop_reason: Option<StopReason>,
 }
 
 pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
@@ -83,6 +115,7 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
         tracing::warn!("mongoose sync is not running as root; NFS mounts usually need sudo");
     }
     raise_fd_limit();
+    let stop = StopState::install()?;
 
     let wd = WorkDir::new(&args.work_dir);
     let root_manifest = manifest::load(&wd)?.ok_or_else(|| {
@@ -91,14 +124,19 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
             wd.root().display()
         )
     })?;
-    migration_core::overlap::check(&root_manifest.source, &root_manifest.dest)?;
+    // Endpoint separation from the recorded job state, every run:
+    // layers 1 and 2 here; layer 3 in the delta copy and before the
+    // cutover read-back (both mount).
+    let src_url = endpoint::parse("manifest source.url", &root_manifest.source.url)?;
+    let dst_url = endpoint::parse("manifest dest.url", &root_manifest.dest.url)?;
+    endpoint::check_overlap(&src_url, &dst_url)?;
+    let names = endpoint::check_overlap_resolved(&src_url, &dst_url)?;
     // The excludes recorded with the job: the rescan must skip exactly
     // what the copy skipped, or every excluded tree classifies NEW.
-    let exclude = read_json_opt::<RunSpec>(&wd.run_json())?
-        .map(|s| s.exclude)
-        .unwrap_or_default();
+    let exclude = job_excludes(&wd)?;
 
-    let baseline = load_baseline(&wd)?;
+    let expected = ExpectedIdentity::from(&root_manifest);
+    let baseline = load_baseline(&wd, &expected)?;
     ensure_baseline_copied(&wd, &baseline)?;
     let pass = baseline.pass + 1;
     let pass_wd = WorkDir::new(wd.pass_dir(pass));
@@ -114,21 +152,24 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
         pass_wd.root().display(),
     );
 
+    let steps = if args.cutover { 6 } else { 5 };
+
     // ---- 1. rescan --------------------------------------------------
-    println!("[1/5] rescan");
+    println!("[1/{steps}] rescan");
     let scan = scan::ensure_scan(
         &pass_wd,
-        &ScanParams {
-            scan_url: tools::scan_url(&root_manifest.source.url, &root_manifest.source.root),
-            workers: args.tuning.walker_workers(),
-            exclude: exclude.clone(),
-        },
+        &source_scan_params(&root_manifest, &exclude, &args.tuning),
     )
     .await?;
 
     // ---- 2. rewrite the full rescan (the next baseline) -------------
-    println!("[2/5] canonical rewrite");
-    let full = match manifest::load(&pass_wd)? {
+    println!("[2/{steps}] canonical rewrite");
+    let full = match manifest::load_validated(
+        &pass_wd,
+        &pass_wd.manifest_json(),
+        Some(&expected),
+        ManifestKind::Canonical,
+    )? {
         Some(m) => {
             println!("  pass index already built; not rewriting");
             m
@@ -146,21 +187,29 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
     };
 
     // ---- 3. classify ------------------------------------------------
-    println!("[3/5] classify against baseline");
+    println!("[3/{steps}] classify against baseline");
     let counts = ensure_classify(&baseline, &pass_wd, &full)?;
     println!(
         "  new {} | dirty {} | pending {} | unchanged {} | deleted {} (recorded only)",
         counts.new, counts.dirty_tuple, counts.dirty_pending, counts.unchanged, counts.deleted,
     );
 
-    // Cutover gate: with source writers stopped, a converged tree
-    // shows zero rows to copy and zero deletions. Anything else is
-    // drift — fail loudly before touching the destination.
+    let mut outcome = SyncOutcome {
+        pass,
+        counts: Some(counts.clone()),
+        copy: None,
+        in_sync: counts.keep_rows == 0,
+        verification: None,
+        interrupted: false,
+        stop_reason: None,
+    };
+
     if args.cutover {
+        // Gate 1: with source writers stopped, a converged source shows
+        // zero rows to copy and zero deletions. Anything else is drift
+        // — fail loudly before touching the destination.
         let drift = counts.keep_rows + counts.deleted;
-        if drift == 0 {
-            println!("  cutover: converged (nothing to copy, no deletions)");
-        } else {
+        if drift != 0 {
             anyhow::bail!(
                 "cutover found drift: {} new, {} dirty, {} pending, {} deleted. Source \
                  writers are supposed to be stopped. Run `mongoose sync` without --cutover \
@@ -171,20 +220,79 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
                 counts.deleted,
             );
         }
-    }
+        println!("  cutover gate 1: source unchanged since the last sync (nothing to copy, no deletions)");
 
-    // ---- 4. emit + copy the delta -----------------------------------
-    let mut outcome = SyncOutcome {
-        pass,
-        counts: Some(counts.clone()),
-        copy: None,
-        in_sync: counts.keep_rows == 0,
-    };
-    if counts.keep_rows == 0 {
-        println!("[4/5] delta: trees are in sync; nothing to copy");
+        // Gate 2: the destination itself, independently of gate 1.
+        let report = cutover_verify(
+            &pass_wd,
+            pass,
+            &root_manifest,
+            &full,
+            &exclude,
+            &args.tuning,
+            steps,
+            (&src_url, &dst_url, &names),
+            stop.clone(),
+        )
+        .await?;
+        match report.status {
+            VerifyStatus::Interrupted => {
+                println!(
+                    "\ncutover verification interrupted after {} of {} entries; \
+                     re-run `mongoose sync --cutover` to resume it",
+                    report.content.entries_done,
+                    report.namespace.files_to_read + report.namespace.symlinks_to_read,
+                );
+                outcome.verification = Some(report);
+                outcome.interrupted = true;
+                outcome.stop_reason = stop.reason();
+                return Ok(outcome);
+            }
+            VerifyStatus::Fail => {
+                let summary = format!(
+                    "{} mismatches ({})",
+                    report.mismatches_total,
+                    report.breakdown()
+                );
+                let failed_dir = fail_pass_dir(&wd, pass)?;
+                println!(
+                    "\ncutover verification FAILED: {summary}\n  \
+                     report      {}\n  \
+                     mismatches  {}\n  \
+                     The baseline was not advanced. This pass was moved aside as evidence; \
+                     the next `mongoose sync` starts a fresh pass {pass}.",
+                    failed_dir.join("verify.json").display(),
+                    failed_dir.join(verify::MISMATCHES_FILE).display(),
+                );
+                anyhow::bail!(
+                    "cutover verification failed: {summary}; see {}",
+                    failed_dir.join("verify.json").display()
+                );
+            }
+            VerifyStatus::Pass => {
+                println!(
+                    "  cutover gate 2: destination verified — {} entries compared, {} files \
+                     ({} bytes) and {} symlinks read back from both servers, 0 mismatches",
+                    report.namespace.matched,
+                    report.content.files_read,
+                    report.content.bytes_read,
+                    report.content.symlinks_read,
+                );
+                outcome.verification = Some(report);
+            }
+        }
+    } else if counts.keep_rows == 0 {
+        // ---- 4. nothing to copy ---------------------------------------
+        println!("[4/{steps}] delta: source unchanged; nothing to copy");
     } else {
-        println!("[4/5] delta: {} rows to copy", counts.keep_rows);
-        let delta = match manifest::load_file(&pass_wd.delta_manifest_json())? {
+        // ---- 4. emit + copy the delta ---------------------------------
+        println!("[4/{steps}] delta: {} rows to copy", counts.keep_rows);
+        let delta = match manifest::load_validated(
+            &pass_wd,
+            &pass_wd.delta_manifest_json(),
+            Some(&expected),
+            ManifestKind::Delta,
+        )? {
             Some(d) => Some(d),
             None => crate::delta::emit(&pass_wd, &full)?,
         };
@@ -202,24 +310,36 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
             delta.total_rows,
             delta.total_bytes
         );
-        let summary = copy::run_manifest(pass_wd.root(), &args.tuning, DELTA_MANIFEST).await?;
+        let summary = copy::run_manifest_with_stop(
+            pass_wd.root(),
+            &args.tuning,
+            DELTA_MANIFEST,
+            stop.clone(),
+        )
+        .await?;
         let interrupted = summary.interrupted;
+        let stop_reason = summary.stop_reason;
         outcome.copy = Some(summary);
         if interrupted {
             println!("sync interrupted; re-run `mongoose sync` to resume this pass");
+            outcome.interrupted = true;
+            outcome.stop_reason = stop_reason;
             return Ok(outcome);
         }
     }
 
-    // ---- 5. advance the baseline (pass commit point) -----------------
-    println!("[5/5] advance baseline to pass {pass}");
-    write_json_atomic(
-        &wd.baseline_json(),
-        &BaselineRecord {
-            pass,
-            dir: format!("passes/pass-{pass:04}"),
-        },
-    )?;
+    // A handled stop at the last stage boundary must leave the old
+    // baseline in place. Once the atomic baseline write starts, the
+    // pass is the committed result.
+    if !write_baseline_if_running(&wd, pass, &stop)? {
+        outcome.interrupted = true;
+        outcome.stop_reason = stop.reason();
+        println!("sync interrupted before baseline advance; re-run to resume this pass");
+        return Ok(outcome);
+    }
+
+    // ---- 5/6. advance the baseline (pass commit point) ----------------
+    println!("[{steps}/{steps}] advance baseline to pass {pass}");
     prune_passes(&wd, pass, KEEP_PASSES);
 
     // The baseline has advanced: this pass's raw scan and its delta
@@ -245,29 +365,198 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
     } else {
         String::new()
     };
-    match &outcome.copy {
-        Some(c) => println!(
+    match (&outcome.copy, &outcome.verification) {
+        (_, Some(v)) => println!(
+            "\ncutover pass {pass} complete: the trees match ({} entries, {} bytes verified); \
+             report in {}",
+            v.namespace.matched,
+            v.content.bytes_read,
+            pass_wd.verify_json().display(),
+        ),
+        (Some(c), None) => println!(
             "\nsync pass {pass} complete: {} copied, {} failed, {} bytes{deleted_note}",
             c.files_ok, c.files_failed, c.bytes_moved
         ),
-        None => println!("\nsync pass {pass} complete: trees in sync{deleted_note}"),
+        (None, None) => println!("\nsync pass {pass} complete: source unchanged{deleted_note}"),
     }
     Ok(outcome)
 }
 
+fn write_baseline_if_running(wd: &WorkDir, pass: u32, stop: &StopState) -> Result<bool> {
+    if stop.token().is_cancelled() {
+        return Ok(false);
+    }
+    write_json_atomic(
+        &wd.baseline_json(),
+        &BaselineRecord {
+            pass,
+            dir: format!("passes/pass-{pass:04}"),
+        },
+    )?;
+    Ok(true)
+}
+
+/// The rescan of the source: same URL, workers, and excludes as
+/// prepare's pass-0 scan.
+pub fn source_scan_params(root: &LocalManifest, exclude: &[String], tuning: &Tuning) -> ScanParams {
+    ScanParams {
+        scan_url: tools::scan_url(&root.source.url, &root.source.root),
+        workers: tuning.walker_workers(),
+        exclude: exclude.to_vec(),
+    }
+}
+
+/// The cutover scan of the destination: the same walker, workers, and
+/// excludes pointed at the destination URL, so an excluded subtree is
+/// absent from both indexes and never reported as missing or extra.
+pub fn dest_scan_params(root: &LocalManifest, exclude: &[String], tuning: &Tuning) -> ScanParams {
+    ScanParams {
+        scan_url: tools::scan_url(&root.dest.url, &root.dest.root),
+        workers: tuning.walker_workers(),
+        exclude: exclude.to_vec(),
+    }
+}
+
+/// Cutover gate 2: scan the destination into `<pass>/dest/`, then run
+/// (or resume) the verification of it against this pass's source
+/// index. Mounts one libnfs pair per `--parallel` for the read-back,
+/// and proves endpoint separation on it first: verifying a tree
+/// against itself would pass.
+#[allow(clippy::too_many_arguments)]
+async fn cutover_verify(
+    pass_wd: &WorkDir,
+    pass: u32,
+    root: &LocalManifest,
+    full: &LocalManifest,
+    exclude: &[String],
+    tuning: &Tuning,
+    steps: usize,
+    endpoints: (&endpoint::NfsUrl, &endpoint::NfsUrl, &NameEvidence),
+    stop: StopState,
+) -> Result<VerifyReport> {
+    let dest_wd = WorkDir::new(pass_wd.dest_dir());
+    std::fs::create_dir_all(dest_wd.root())
+        .with_context(|| format!("creating {}", dest_wd.root().display()))?;
+
+    println!("[4/{steps}] scan the destination");
+    let dscan = scan::ensure_scan(&dest_wd, &dest_scan_params(root, exclude, tuning)).await?;
+    let expected = ExpectedIdentity::from(root);
+    let dest_index = match manifest::load_validated(
+        &dest_wd,
+        &dest_wd.manifest_json(),
+        Some(&expected),
+        ManifestKind::Canonical,
+    )? {
+        Some(m) => {
+            println!("  destination index already built; not rewriting");
+            m
+        }
+        None => {
+            scan::ensure_canonical(&dest_wd, &dscan).await?;
+            manifest::build(
+                &dest_wd,
+                &root.run_id,
+                root.source.clone(),
+                root.dest.clone(),
+                root.options.clone(),
+            )?
+        }
+    };
+    scan::purge_scan_output(&dest_wd);
+
+    println!("[5/{steps}] verify the destination against the source");
+    let checker = LibnfsChecker::mount(
+        &root.source.url,
+        &root.dest.url,
+        &root.source.root,
+        &root.dest.root,
+        tuning.parallel.max(1) as usize,
+    )?;
+    let source_shards: Vec<PathBuf> = full
+        .shards
+        .iter()
+        .map(|s| pass_wd.shard_path(&s.path))
+        .collect();
+    for shard in &full.shards {
+        manifest::verify_shard_integrity(pass_wd, shard)?;
+    }
+    for shard in &dest_index.shards {
+        manifest::verify_shard_integrity(&dest_wd, shard)?;
+    }
+    let (src_url, dst_url, names) = endpoints;
+    let separation =
+        identity::prove_separation(&checker.pool(), src_url, dst_url, names, &source_shards)
+            .await?;
+    println!("  endpoints: {}", separation.evidence);
+    let params = VerifyParams {
+        run_id: root.run_id.clone(),
+        pass,
+        source: root.source.clone(),
+        dest: root.dest.clone(),
+        options: root.options.clone(),
+        source_shards,
+        dest_shards: dest_index
+            .shards
+            .iter()
+            .map(|s| dest_wd.shard_path(&s.path))
+            .collect(),
+        concurrency: tuning.parallel.max(1) as usize,
+        buckets: CLASSIFY_BUCKETS,
+    };
+    verify::run(pass_wd, &params, checker, stop.token()).await
+}
+
+/// Move a pass whose cutover verification failed to
+/// `passes/pass-NNNN-failed-<utc>/`. Its scans, classification, and
+/// report stay as evidence; the next sync starts pass NNNN afresh
+/// instead of reusing checkpoints that already proved a mismatch.
+/// Never pruned automatically.
+fn fail_pass_dir(wd: &WorkDir, pass: u32) -> Result<PathBuf> {
+    let from = wd.pass_dir(pass);
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let to = wd
+        .root()
+        .join("passes")
+        .join(format!("pass-{pass:04}-failed-{stamp}"));
+    std::fs::rename(&from, &to)
+        .with_context(|| format!("moving {} to {}", from.display(), to.display()))?;
+    if let Some(parent) = to.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(to)
+}
+
 /// Load `baseline.json`, defaulting to pass 0 at the work-dir root.
-fn load_baseline(wd: &WorkDir) -> Result<Baseline> {
+fn load_baseline(wd: &WorkDir, expected: &ExpectedIdentity) -> Result<Baseline> {
     let record = read_json_opt::<BaselineRecord>(&wd.baseline_json())?.unwrap_or(BaselineRecord {
         pass: 0,
         dir: ".".to_string(),
     });
-    let dir = if record.dir == "." {
+    let expected_dir = if record.pass == 0 {
+        ".".to_string()
+    } else {
+        format!("passes/pass-{:04}", record.pass)
+    };
+    anyhow::ensure!(
+        record.dir == expected_dir,
+        "baseline directory {} does not match pass {}; expected {}",
+        record.dir,
+        record.pass,
+        expected_dir
+    );
+    let dir = if record.pass == 0 {
         wd.root().to_path_buf()
     } else {
         wd.root().join(&record.dir)
     };
     let baseline_wd = WorkDir::new(&dir);
-    let manifest = manifest::load(&baseline_wd)?.ok_or_else(|| {
+    let manifest = manifest::load_validated(
+        &baseline_wd,
+        &baseline_wd.manifest_json(),
+        Some(expected),
+        ManifestKind::Canonical,
+    )?
+    .ok_or_else(|| {
         anyhow::anyhow!(
             "baseline pass {} has no manifest at {}; the work dir is damaged",
             record.pass,
@@ -308,6 +597,14 @@ fn ensure_classify(
     pass_wd: &WorkDir,
     full: &LocalManifest,
 ) -> Result<ClassifyCounts> {
+    let expected = ExpectedIdentity::from(&baseline.manifest);
+    manifest::validate(
+        &baseline.wd,
+        &baseline.manifest,
+        Some(&expected),
+        ManifestKind::Canonical,
+    )?;
+    manifest::validate(pass_wd, full, Some(&expected), ManifestKind::Canonical)?;
     let checkpoint_path = pass_wd.root().join("classify.json");
     if let Some(cp) = read_json_opt::<ClassifyCheckpoint>(&checkpoint_path)? {
         if cp.complete {
@@ -417,22 +714,71 @@ fn prune_passes(wd: &WorkDir, current_pass: u32, keep: u32) {
 mod tests {
     use super::*;
     use crate::progress::CopyProgress;
+    use arrow::array::{ArrayRef, UInt8Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
     use migration_core::records::FailurePhase;
     use migration_core::time::UtcTime;
+    use std::sync::Arc;
+
+    fn endpoint_for_test(url: &str) -> migration_core::records::Endpoint {
+        migration_core::records::Endpoint {
+            kind: migration_core::records::EndpointKind::Nfs,
+            url: url.into(),
+            root: "/".into(),
+        }
+    }
 
     #[test]
     fn baseline_defaults_to_pass_zero_root() {
         let dir = tempfile::tempdir().unwrap();
         let wd = WorkDir::new(dir.path());
         // No manifest at all: damaged/unprepared work dir.
-        let err = load_baseline(&wd).unwrap_err();
+        let expected = ExpectedIdentity {
+            run_id: "run-t".into(),
+            source: endpoint_for_test("nfs://s/e"),
+            dest: endpoint_for_test("nfs://d/e"),
+        };
+        let err = load_baseline(&wd, &expected).unwrap_err();
         assert!(format!("{err:#}").contains("baseline pass 0"), "{err:#}");
+    }
+
+    #[test]
+    fn interrupted_sync_does_not_advance_the_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let wd = WorkDir::new(dir.path());
+        let stop = StopState::new();
+        assert!(write_baseline_if_running(&wd, 3, &stop).unwrap());
+        stop.request(StopReason::Sigterm);
+        assert!(!write_baseline_if_running(&wd, 4, &stop).unwrap());
+        let baseline: BaselineRecord = crate::util::read_json_opt(&wd.baseline_json())
+            .unwrap()
+            .expect("baseline remains present");
+        assert_eq!(baseline.pass, 3);
     }
 
     #[test]
     fn sync_requires_the_initial_copy_to_be_complete() {
         let dir = tempfile::tempdir().unwrap();
         let wd = WorkDir::new(dir.path());
+        std::fs::create_dir_all(wd.canonical_dir()).unwrap();
+        let shard_path = wd.canonical_dir().join("part-0000.parquet");
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::UInt8,
+            false,
+        )]));
+        let values: ArrayRef = Arc::new(UInt8Array::from(vec![1]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![values]).unwrap();
+        let mut writer = parquet::arrow::ArrowWriter::try_new(
+            std::fs::File::create(&shard_path).unwrap(),
+            schema,
+            None,
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let shard_bytes = std::fs::metadata(&shard_path).unwrap().len();
         let m = LocalManifest {
             format_version: crate::manifest::MANIFEST_FORMAT_VERSION,
             run_id: "run-t".into(),
@@ -451,14 +797,15 @@ mod tests {
             shards: vec![crate::manifest::LocalShard {
                 path: "canonical/part-0000.parquet".into(),
                 rows: 1,
-                bytes: 1,
-                sha256: "x".into(),
+                bytes: shard_bytes,
+                sha256: crate::util::sha256_file(&shard_path).unwrap(),
             }],
             total_rows: 1,
-            total_bytes: 1,
+            total_bytes: shard_bytes,
         };
+        let expected = ExpectedIdentity::from(&m);
         crate::util::write_json_atomic(&wd.manifest_json(), &m).unwrap();
-        let baseline = load_baseline(&wd).unwrap();
+        let baseline = load_baseline(&wd, &expected).unwrap();
         assert_eq!(baseline.pass, 0);
 
         // No progress.json → not copied yet.
@@ -530,6 +877,74 @@ mod tests {
             "benign downgrades are not pending"
         );
         assert_eq!(pending.len(), 2);
+    }
+
+    fn manifest_for(src: &str, dst: &str) -> LocalManifest {
+        LocalManifest {
+            format_version: crate::manifest::MANIFEST_FORMAT_VERSION,
+            run_id: "run-t".into(),
+            created_utc: "2026-09-28T00:00:00Z".into(),
+            source: migration_core::records::Endpoint {
+                kind: migration_core::records::EndpointKind::Nfs,
+                url: src.into(),
+                root: "/".into(),
+            },
+            dest: migration_core::records::Endpoint {
+                kind: migration_core::records::EndpointKind::Nfs,
+                url: dst.into(),
+                root: "/".into(),
+            },
+            options: migration_core::records::MigrationOptions::default(),
+            shards: vec![],
+            total_rows: 0,
+            total_bytes: 0,
+        }
+    }
+
+    /// The exclude set is job identity: the cutover's destination scan
+    /// must skip exactly what every source scan skipped, or an excluded
+    /// tree shows up as missing (or, on the destination, as extra).
+    #[test]
+    fn source_and_dest_scans_share_workers_and_excludes() {
+        let m = manifest_for("nfs://old/export/data", "nfs://new/export/copy");
+        let exclude = vec![".snapshot".to_string(), "tmp".to_string()];
+        let tuning = Tuning { parallel: 8 };
+        let src = source_scan_params(&m, &exclude, &tuning);
+        let dst = dest_scan_params(&m, &exclude, &tuning);
+        assert_eq!(src.scan_url, "nfs://old/export/data");
+        assert_eq!(dst.scan_url, "nfs://new/export/copy");
+        assert_eq!(src.exclude, exclude);
+        assert_eq!(dst.exclude, src.exclude);
+        assert_eq!(src.workers, 8);
+        assert_eq!(dst.workers, src.workers);
+    }
+
+    #[test]
+    fn failed_pass_is_moved_aside_with_its_evidence_and_never_pruned() {
+        let dir = tempfile::tempdir().unwrap();
+        let wd = WorkDir::new(dir.path());
+        let pass_wd = WorkDir::new(wd.pass_dir(3));
+        std::fs::create_dir_all(pass_wd.verify_dir()).unwrap();
+        std::fs::write(pass_wd.verify_json(), b"{}").unwrap();
+
+        let moved = fail_pass_dir(&wd, 3).unwrap();
+        assert!(!wd.pass_dir(3).exists(), "pass 3 starts fresh next time");
+        assert!(moved
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("pass-0003-failed-"));
+        assert!(moved.join("verify.json").exists(), "evidence kept");
+
+        // Pruning after later passes leaves the evidence alone.
+        for k in 3..=6u32 {
+            std::fs::create_dir_all(wd.pass_dir(k)).unwrap();
+        }
+        prune_passes(&wd, 6, 2);
+        assert!(moved.exists());
+        assert!(!wd.pass_dir(3).exists());
+        assert!(wd.pass_dir(6).exists());
     }
 
     #[test]

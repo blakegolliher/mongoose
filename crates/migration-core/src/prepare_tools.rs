@@ -102,8 +102,13 @@ pub struct WalkerInvocation {
     pub scan_url: String,
     pub output: PathBuf,
     pub workers: usize,
+    /// `--exclude REGEX`: matched against the full path (vamoose).
     pub exclude: Vec<String>,
-    pub shard_size_mb: u64,
+    /// `--exclude-dir GLOB`: matched against a directory's name; the
+    /// directory and its subtree are skipped (mongoose's `--exclude`).
+    pub exclude_dirs: Vec<String>,
+    /// The walker sizes its own part files (512 MiB built in, as of
+    /// nfs-walker 0.2.0; the old `--parquet-file-size-mb` flag is gone).
     pub log: PathBuf,
 }
 
@@ -115,8 +120,6 @@ impl WalkerInvocation {
             self.output.clone().into_os_string(),
             "--workers".into(),
             self.workers.to_string().into(),
-            "--parquet-file-size-mb".into(),
-            self.shard_size_mb.to_string().into(),
             "--log".into(),
             self.log.clone().into_os_string(),
             "--log-fmt".into(),
@@ -125,6 +128,10 @@ impl WalkerInvocation {
         for pattern in &self.exclude {
             args.push("--exclude".into());
             args.push(pattern.clone().into());
+        }
+        for glob in &self.exclude_dirs {
+            args.push("--exclude-dir".into());
+            args.push(glob.clone().into());
         }
         args
     }
@@ -135,10 +142,10 @@ impl WalkerInvocation {
         &[
             "--output",
             "--workers",
-            "--parquet-file-size-mb",
             "--log",
             "--log-fmt",
             "--exclude",
+            "--exclude-dir",
         ]
     }
 }
@@ -365,8 +372,8 @@ mod tests {
             scan_url: "nfs://h/export/data".into(),
             output: "/w/scan/attempt-0001/walk.parquet".into(),
             workers: 8,
-            exclude: vec![".snapshot".into(), "tmp".into()],
-            shard_size_mb: 256,
+            exclude: vec![r"/\.Trash(/|$)".into()],
+            exclude_dirs: vec![".snapshot".into(), "tmp".into()],
             log: "/w/scan/attempt-0001/walker.jsonl".into(),
         };
         let args: Vec<String> = inv
@@ -382,15 +389,15 @@ mod tests {
                 "/w/scan/attempt-0001/walk.parquet",
                 "--workers",
                 "8",
-                "--parquet-file-size-mb",
-                "256",
                 "--log",
                 "/w/scan/attempt-0001/walker.jsonl",
                 "--log-fmt",
                 "json",
                 "--exclude",
+                r"/\.Trash(/|$)",
+                "--exclude-dir",
                 ".snapshot",
-                "--exclude",
+                "--exclude-dir",
                 "tmp",
             ]
         );
@@ -440,7 +447,7 @@ mod tests {
             output: "/w/walk.parquet".into(),
             workers: 1,
             exclude: vec!["x".into()],
-            shard_size_mb: 1,
+            exclude_dirs: vec!["y".into()],
             log: "/w/log".into(),
         };
         for arg in inv.args() {
@@ -483,7 +490,7 @@ Options:
         );
         assert_eq!(
             missing_flags(help, WalkerInvocation::long_flags()),
-            vec!["--parquet-file-size-mb", "--log"]
+            vec!["--log", "--exclude-dir"]
         );
         assert!(missing_flags(help, &["--output", "--exclude"]).is_empty());
     }

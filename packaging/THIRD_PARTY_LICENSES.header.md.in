@@ -1,0 +1,26 @@
+# Third-party licenses and notices
+
+This inventory was generated for mongoose @VERSION@ from `Cargo.lock` and the
+pinned native-library source. It accompanies the exact release binary.
+
+## libnfs
+
+- Repository: <@LIBNFS_URL@>
+- Revision: `@LIBNFS_SHA@`
+- Linkage: statically linked into mongoose
+- Client library and headers: `LGPL-2.1-or-later`
+- Generated protocol sources described by libnfs `COPYING`: `BSD-2-Clause`
+- Complete source: `libnfs-@LIBNFS_SHORT_SHA@-source.tar.gz`
+- Replacement/relink instructions: `mongoose-@VERSION@-relink-kit.tar.gz`
+
+The complete LGPL 2.1 and libnfs BSD license texts are installed alongside
+this file and are also included in `LICENSES.txt`. The source bundle preserves
+libnfs's per-file notices and its `COPYING` explanation of the split licensing.
+
+## nfs-walker
+
+- Repository: <@NFS_WALKER_URL@>
+- Revision: `@NFS_WALKER_SHA@`
+- License: `MIT`
+- Role: Rust scanning library compiled into mongoose
+

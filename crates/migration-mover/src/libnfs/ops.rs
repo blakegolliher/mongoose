@@ -356,6 +356,16 @@ pub fn unlink(ctx: &mut NfsContext, path: &[u8]) -> Result<(), MoveError> {
     Ok(())
 }
 
+/// Remove an empty directory.
+pub fn rmdir(ctx: &mut NfsContext, path: &[u8]) -> Result<(), MoveError> {
+    let c = cstr_from_bytes(path)?;
+    let rc = unsafe { super::nfs_rmdir(ctx.raw(), c.as_ptr()) };
+    if rc < 0 {
+        return Err(err_from_rc(ctx, rc, FailurePhase::Rename));
+    }
+    Ok(())
+}
+
 /// Create a single directory. Returns `Ok` for `EEXIST` since the
 /// caller-side `mkdir_p` walks ancestors that may already exist.
 pub fn mkdir(ctx: &mut NfsContext, path: &[u8], mode: u32) -> Result<(), MoveError> {

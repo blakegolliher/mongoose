@@ -1,0 +1,21 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: mongoose
+Source: https://github.com/blakegolliher/mongoose
+
+Files: *
+Copyright: 2026 Blake Golliher
+License: MIT
+ The complete text is installed as /usr/share/doc/mongoose/LICENSE-MIT.
+
+Files: embedded-libnfs-client-library
+Copyright: 2010-2026 Ronnie Sahlberg and libnfs contributors
+License: LGPL-2.1-or-later
+ The complete text is installed as
+ /usr/share/doc/mongoose/LICENSE-LGPL-2.1.txt. Exact corresponding source and
+ relinking instructions are in LIBNFS_SOURCE.md in the same directory.
+
+Files: embedded-libnfs-generated-protocol-code
+Copyright: 2014-2026 Ronnie Sahlberg and libnfs contributors
+License: BSD-2-Clause
+ The complete text is installed as
+ /usr/share/doc/mongoose/LICENSE-BSD-2-Clause-libnfs.txt.

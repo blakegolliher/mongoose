@@ -40,10 +40,15 @@ an explicit design change.
   do not write your own.
 
 - **Source and dest paths must be provably distinct before any
-  write.** A startup check (`migration_core::overlap::check`)
-  verifies endpoints don't overlap; a per-file check inside the
-  mover verifies the specific paths don't collide. Both checks must
-  exist; either alone is insufficient.
+  write.** A startup check (`migration_core::overlap::check` in the
+  worker; `mongoose::endpoint` + `mongoose::identity` in mongoose,
+  which also canonicalize spellings, resolve names, and compare the
+  mounted roots' filehandles, `(fsid, fileid)`, and ancestry) verifies
+  endpoints don't overlap; a per-file check inside the mover verifies
+  the specific paths don't collide. Both checks must exist; either
+  alone is insufficient. `MoverConfig::same_server` arms the per-file
+  check and must never be set to false to silence it: string
+  inequality of two URLs is not proof of two servers.
 
 - **`.partial` is in the same directory as the final destination.**
   This is a correctness requirement for atomic rename, but combined
@@ -109,6 +114,14 @@ an explicit design change.
   slow read) must layer a higher-level cancellation token themselves
   and decide what to do with the in-flight bytes — they cannot rely
   on Drop to make the RPC stop.
+
+- **Static libnfs releases fail closed on LGPL compliance.** Mongoose
+  intentionally preserves a single-binary runtime by linking the pinned
+  LGPL-2.1-or-later libnfs build statically. This is permitted only with the
+  notices, exact corresponding source, relinkable work, instructions, and
+  verified relink exercise required by [LGPL_COMPLIANCE.md](LGPL_COMPLIANCE.md).
+  Never publish an artifact that has not passed the release-mode compliance
+  gate. Do not weaken or bypass that gate to make a release succeed.
 
 ## Verification gates
 
@@ -198,4 +211,5 @@ than implementing an older plan implicitly.
   invariants.
 - `docs/CLAIM_PROTOCOL.md` — current S3 claim protocol.
 - `THIRD_PARTY_LICENSES.md` — generated dependency inventory. libnfs is
-  **LGPL-2.1-or-later, dynamic-linked only**.
+  **LGPL-2.1-or-later and intentionally statically linked**; distribution is
+  governed by `docs/LGPL_COMPLIANCE.md` and its fail-closed release gate.

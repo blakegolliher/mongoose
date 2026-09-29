@@ -243,6 +243,9 @@ pub async fn run_with_stop(
     let fence = Fence::new();
 
     let mover_params = crate::mover_factory::MoverParams {
+        // The worker has only the startup string check; keep the
+        // per-file guard armed whenever the URLs match.
+        same_server: manifest.source.url == manifest.dest.url,
         source_url: manifest.source.url.clone(),
         dest_url: manifest.dest.url.clone(),
         source_root: manifest.source.root.clone(),

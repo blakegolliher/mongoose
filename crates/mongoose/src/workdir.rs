@@ -84,6 +84,23 @@ impl WorkDir {
         self.root.join("delta")
     }
 
+    /// `dest/` — the destination index a cutover pass scans, laid out
+    /// like a pass dir of its own (scan/, canonical/, manifest.json).
+    pub fn dest_dir(&self) -> PathBuf {
+        self.root.join("dest")
+    }
+
+    /// `verify/` — cutover verification working state: checkpoints,
+    /// the content work list, and every mismatch record.
+    pub fn verify_dir(&self) -> PathBuf {
+        self.root.join("verify")
+    }
+
+    /// `verify.json` — the cutover verification report.
+    pub fn verify_json(&self) -> PathBuf {
+        self.root.join("verify.json")
+    }
+
     /// Resolve a manifest shard path (work-dir-relative) to an
     /// absolute path.
     pub fn shard_path(&self, relative: &str) -> PathBuf {
@@ -122,13 +139,17 @@ pub struct RunSpec {
 }
 
 /// Write the run spec on first use; on resume, refuse a spec that
-/// names a different source, destination, or exclude set.
+/// names a different source, destination, or exclude set. URLs are
+/// compared in canonical form, so a work dir recorded before
+/// canonicalization (or with another spelling of the same name) still
+/// resumes.
 pub fn ensure_run_spec(path: &Path, fresh: RunSpec) -> Result<RunSpec> {
     match read_json_opt::<RunSpec>(path)? {
         Some(existing) => {
-            let same_endpoints = existing.source.url == fresh.source.url
+            let same_endpoints = canonical_url(&existing.source.url)
+                == canonical_url(&fresh.source.url)
                 && existing.source.root == fresh.source.root
-                && existing.dest.url == fresh.dest.url
+                && canonical_url(&existing.dest.url) == canonical_url(&fresh.dest.url)
                 && existing.dest.root == fresh.dest.root;
             if !same_endpoints {
                 anyhow::bail!(
@@ -164,11 +185,28 @@ pub fn ensure_run_spec(path: &Path, fresh: RunSpec) -> Result<RunSpec> {
     }
 }
 
+/// Canonical spelling for identity comparison; an unparseable URL
+/// compares as itself.
+fn canonical_url(url: &str) -> String {
+    crate::endpoint::parse("url", url)
+        .map(|u| u.url())
+        .unwrap_or_else(|_| url.to_string())
+}
+
 fn sorted(v: &[String]) -> Vec<&str> {
     let mut out: Vec<&str> = v.iter().map(String::as_str).collect();
     out.sort_unstable();
     out.dedup();
     out
+}
+
+/// The job's `--exclude` set as recorded at `copy` time: what every
+/// later scan (sync, cutover, destination) must skip too. Empty when
+/// the work dir predates excludes.
+pub fn job_excludes(wd: &WorkDir) -> Result<Vec<String>> {
+    Ok(read_json_opt::<RunSpec>(&wd.run_json())?
+        .map(|s| s.exclude)
+        .unwrap_or_default())
 }
 
 pub fn default_run_id() -> String {
@@ -254,6 +292,25 @@ mod tests {
     }
 
     #[test]
+    fn run_spec_compares_urls_canonically() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.json");
+        let mut recorded = spec();
+        recorded.source.url = "nfs://Old.Example.COM:2049/export/".into();
+        ensure_run_spec(&path, recorded.clone()).unwrap();
+        let mut again = spec();
+        again.source.url = "nfs://old.example.com./export".into();
+        assert_eq!(
+            ensure_run_spec(&path, again).unwrap(),
+            recorded,
+            "same server, resumes"
+        );
+        let mut other = spec();
+        other.source.url = "nfs://old2.example.com/export".into();
+        assert!(ensure_run_spec(&path, other).is_err());
+    }
+
+    #[test]
     fn run_spec_excludes_are_sticky_but_order_insensitive() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("run.json");
@@ -269,6 +326,26 @@ mod tests {
         fewer.exclude.pop();
         let err = ensure_run_spec(&path, fewer).unwrap_err();
         assert!(format!("{err:#}").contains("--exclude"), "{err:#}");
+    }
+
+    /// Pass 0 scans with the set the flags gave; every later pass
+    /// reads the same set back from run.json.
+    #[test]
+    fn later_scans_read_back_the_exclude_set_pass_zero_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let wd = WorkDir::new(dir.path());
+        let mut first = spec();
+        first.exclude = vec![".snapshot".into(), "*.tmp".into()];
+        let recorded = ensure_run_spec(&wd.run_json(), first.clone()).unwrap();
+        assert_eq!(recorded.exclude, first.exclude, "what pass 0 scans with");
+        assert_eq!(
+            job_excludes(&wd).unwrap(),
+            first.exclude,
+            "what sync scans with"
+        );
+        assert!(job_excludes(&WorkDir::new(dir.path().join("none")))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

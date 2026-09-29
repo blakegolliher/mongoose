@@ -1,0 +1,65 @@
+# Relinking mongoose @VERSION@ with a modified libnfs
+
+This kit is the machine-readable work/source material for the mongoose
+@VERSION@ executable that statically includes libnfs. It is intentionally
+self-contained for Rust dependencies and can be built with Cargo offline.
+
+## Exact release inputs
+
+- mongoose revision: `@MONGOOSE_SHA@`
+- libnfs repository: <@LIBNFS_URL@>
+- libnfs revision: `@LIBNFS_SHA@`
+- official `libnfs.a` SHA-256: `@LIBNFS_STATIC_SHA@`
+- nfs-walker repository: <@NFS_WALKER_URL@>
+- nfs-walker revision: `@NFS_WALKER_SHA@`
+- target: `x86_64-unknown-linux-gnu.2.34`
+- Rust: `@RUSTC_VERSION@`
+- Cargo: `@CARGO_VERSION@`
+- cargo-zigbuild: `@CARGO_ZIGBUILD_VERSION@`
+- Zig: `@ZIG_VERSION@`
+- CMake: `@CMAKE_VERSION@`
+- GNU ar/ranlib: `@BINUTILS_VERSION@`
+
+The official archive was built by `build-libnfs-static.sh`; its path-remapping
+flags make an unmodified `libnfs.a` reproducible across checkout directories.
+The mongoose release profile uses LTO, one codegen unit, `panic=abort`, and
+stripping, as recorded in `mongoose/Cargo.toml`.
+
+## Build a replacement
+
+Install the toolchain versions above, set `ZIG` to the Zig executable if it is
+not on `PATH`, and make any interface-compatible changes under `libnfs/`.
+Then, from the extracted kit root:
+
+```sh
+./build-libnfs-static.sh --source ./libnfs --output ./modified-stage
+
+cd mongoose
+export VAMOOSE_LIBNFS_DIR="$PWD/../modified-stage"
+export NFS_WALKER_LIBNFS_DIR="$PWD/../modified-stage"
+export CARGO_ZIGBUILD_ZIG_PATH="${ZIG:-zig}"
+cargo zigbuild --release --locked --offline \
+  --target x86_64-unknown-linux-gnu.2.34 -p mongoose
+```
+
+The replacement executable is
+`mongoose/target/x86_64-unknown-linux-gnu/release/mongoose`. Both mongoose
+libnfs consumers explicitly link the replacement static archive from the two
+environment variables above.
+
+## Automated proof
+
+`verify-relink.sh` copies the bundled libnfs source, makes a harmless but
+binary-visible change to an out-of-memory diagnostic, builds it, runs the
+mongoose library smoke tests against it, produces a portable replacement
+binary, verifies that the marker reached that binary, and confirms there is no
+dynamic libnfs dependency:
+
+```sh
+./verify-relink.sh --original /path/to/mongoose-linux-x86_64 \
+  --evidence ./RELINK-VERIFICATION.txt
+```
+
+The release's successful run is recorded in the companion
+`RELINK-VERIFICATION.txt` asset. This procedure does not require or permit
+network access; all Cargo dependencies are in `mongoose/vendor/`.

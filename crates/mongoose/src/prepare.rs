@@ -30,9 +30,13 @@ pub async fn run(args: &CopyArgs) -> Result<LocalManifest> {
 
     // Validate both URLs and refuse an overlapping pair before any
     // long stage — and before writing anything to the work dir.
+    // Layers 1 and 2 (canonical spelling, then name resolution); the
+    // mounted check (layer 3) runs in `copy` before the first write.
     let src = endpoint::parse("--src", &args.src)?;
     let dst = endpoint::parse("--dst", &args.dst)?;
+    crate::exclude::validate("--exclude", &args.exclude)?;
     endpoint::check_overlap(&src, &dst)?;
+    let names = endpoint::check_overlap_resolved(&src, &dst)?;
     let source = Endpoint {
         kind: EndpointKind::Nfs,
         url: src.url(),
@@ -43,7 +47,6 @@ pub async fn run(args: &CopyArgs) -> Result<LocalManifest> {
         url: dst.url(),
         root: ROOT.to_string(),
     };
-    migration_core::overlap::check(&source, &dest)?;
 
     let wd = WorkDir::new(&args.work_dir);
     std::fs::create_dir_all(wd.root())
@@ -60,10 +63,11 @@ pub async fn run(args: &CopyArgs) -> Result<LocalManifest> {
     )?;
 
     println!(
-        "mongoose copy\n  job      {}\n  source   {}\n  dest     {}\n  exclude  {}\n  work     {}\n",
+        "mongoose copy\n  job      {}\n  source   {}\n  dest     {}\n  servers  {}\n  exclude  {}\n  work     {}\n",
         spec.run_id,
         spec.source.url,
         spec.dest.url,
+        names.describe(),
         if spec.exclude.is_empty() {
             "(none)".to_string()
         } else {
@@ -143,6 +147,39 @@ mod tests {
         let a = args("nfs://h/export", "nfs://h/export/dst", dir.path());
         let err = run(&a).await.unwrap_err();
         assert!(format!("{err:#}").contains("overlap"), "{err:#}");
+        assert!(
+            !dir.path().join("run.json").exists(),
+            "refused before writing anything"
+        );
+    }
+
+    #[tokio::test]
+    async fn aliased_overlapping_endpoints_are_refused_before_any_work() {
+        let dir = tempfile::tempdir().unwrap();
+        // Two spellings of one loopback server (resolved through
+        // /etc/hosts), destination inside source.
+        let a = args(
+            "nfs://localhost/export",
+            "nfs://127.0.0.1/export/dst",
+            dir.path(),
+        );
+        let err = run(&a).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("overlap") && msg.contains("both names resolve to"),
+            "{msg}"
+        );
+        assert!(!dir.path().join("run.json").exists());
+    }
+
+    #[tokio::test]
+    async fn invalid_exclude_is_refused_before_any_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = args("nfs://old/export", "nfs://new/export", dir.path());
+        a.exclude = vec![".snapshot".into(), "a/b".into()];
+        let err = run(&a).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("--exclude") && msg.contains("a/b"), "{msg}");
         assert!(
             !dir.path().join("run.json").exists(),
             "refused before writing anything"
