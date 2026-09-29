@@ -1,8 +1,0 @@
-[run]
-bucket = "vamoose"
-endpoint = "https://s3.example.com"
-region = "us-east-1"
-
-[mover]
-src_url = "nfs://source.example.com/export"
-dst_url = "nfs://destination.example.com/export"
