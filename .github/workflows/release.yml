@@ -130,7 +130,7 @@ jobs:
         run: |
           lock=packaging/release-toolchain.lock.json
           cargo install --locked cargo-zigbuild --version "$(jq -er .cargo_zigbuild "$lock")"
-          cargo install --locked cargo-about --version "$(jq -er .cargo_about "$lock")"
+          cargo install --locked cargo-about --version "$(jq -er .cargo_about "$lock")" --features cli
           cargo install --locked cargo-cyclonedx --version "$(jq -er .cargo_cyclonedx "$lock")"
 
       - name: Install locked cyclonedx-cli
