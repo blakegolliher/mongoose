@@ -33,7 +33,7 @@ test -f "$kit_root/mongoose/Cargo.lock" || fail "kit omits mongoose source"
 test -d "$kit_root/mongoose/vendor" || fail "kit omits vendored Cargo dependencies"
 test -f "$kit_root/libnfs/lib/libnfs.c" || fail "kit omits libnfs source"
 
-for command_name in cargo cargo-zigbuild cmake jq readelf sha256sum strings; do
+for command_name in cargo cargo-zigbuild cmake grep jq readelf sha256sum; do
     command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is required"
 done
 
@@ -71,6 +71,10 @@ export CARGO_ZIGBUILD_ZIG_PATH="$zig_bin"
 export CARGO_ZIGBUILD_CACHE_DIR="$work_root/cargo-zigbuild-cache"
 export ZIG_GLOBAL_CACHE_DIR="$work_root/zig-global-cache"
 export ZIG_LOCAL_CACHE_DIR="$work_root/zig-local-cache"
+# An empty Cargo home has no registry index, crate cache, or git checkout to
+# fall back on, so the build can only use vendor/ through the kit's source map.
+export CARGO_HOME="$work_root/cargo-home"
+mkdir -p "$CARGO_HOME"
 
 (
     cd "$kit_root/mongoose"
@@ -83,8 +87,11 @@ export ZIG_LOCAL_CACHE_DIR="$work_root/zig-local-cache"
 
 candidate="$work_root/target-portable/x86_64-unknown-linux-gnu/release/mongoose"
 test -x "$candidate" || fail "portable replacement binary was not produced"
-strings "$candidate" | grep -Fq "$marker" || fail "modified libnfs marker is absent from replacement binary"
-if readelf -d "$candidate" 2>/dev/null | grep -q 'Shared library: \[libnfs'; then
+# No pipelines here: under pipefail, `strings | grep -q` fails whenever grep
+# stops reading before strings finishes (SIGPIPE), even on a match.
+LC_ALL=C grep -Faq -- "$marker" "$candidate" || fail "modified libnfs marker is absent from replacement binary"
+dynamic_section=$(readelf -d "$candidate") || fail "cannot inspect dynamic dependencies of the replacement binary"
+if grep -q 'Shared library: \[libnfs' <<<"$dynamic_section"; then
     fail "replacement binary unexpectedly depends on shared libnfs"
 fi
 "$candidate" licenses --component libnfs >/dev/null
@@ -108,7 +115,7 @@ Modified libnfs.a SHA-256: $modified_lib_sha
 Official mongoose SHA-256: $original_sha
 Modified-relink mongoose SHA-256: $candidate_sha
 
-PASS: clean extracted source and vendored dependencies built offline
+PASS: clean extracted source and vendored dependencies built offline with an isolated, empty CARGO_HOME
 PASS: mongoose library smoke tests linked and ran with modified libnfs
 PASS: portable replacement executable linked with modified libnfs
 PASS: deliberate marker "$marker" is present in the replacement executable

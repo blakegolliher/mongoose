@@ -1,9 +1,13 @@
 # PR-11B handoff — dependency and advisory remediation
 
 Status: **Phase 1 merged** (mongoose PR #6, `e422bc0`, 2026-09-29), which
-approved its design. **Phase 2 implemented** on branch
-`pr-11b-dependency-updates` (2026-09-29), with the walker half in nfs-walker
-PR #11. See "Phase 2 (implemented)" below.
+approved its design. **Phase 2 merged** (mongoose PR #7, `d4e782a`, and
+nfs-walker PR #11, `f659573`, 2026-09-29). See "Phase 2 (implemented)" below.
+The owner release gate then failed on two relink-kit defects, which are
+outside this handoff: a SIGPIPE false failure in `verify-relink.sh`, and an
+empty offline source map from `cargo vendor --quiet`. Branch
+`lgpl-relink-repair` fixes both. PR-11B is not complete until
+`make release` passes.
 
 Suggested implementers:
 

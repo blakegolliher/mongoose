@@ -35,6 +35,7 @@ Then, from the extracted kit root:
 ./build-libnfs-static.sh --source ./libnfs --output ./modified-stage
 
 cd mongoose
+export CARGO_HOME="$PWD/../cargo-home"
 export VAMOOSE_LIBNFS_DIR="$PWD/../modified-stage"
 export NFS_WALKER_LIBNFS_DIR="$PWD/../modified-stage"
 export CARGO_ZIGBUILD_ZIG_PATH="${ZIG:-zig}"
@@ -45,15 +46,18 @@ cargo zigbuild --release --locked --offline \
 The replacement executable is
 `mongoose/target/x86_64-unknown-linux-gnu/release/mongoose`. Both mongoose
 libnfs consumers explicitly link the replacement static archive from the two
-environment variables above.
+environment variables above. The new, empty `CARGO_HOME` keeps Cargo from
+using anything but `vendor/`, to which `.cargo/config.toml` maps every locked
+dependency source.
 
 ## Automated proof
 
-`verify-relink.sh` copies the bundled libnfs source, makes a harmless but
-binary-visible change to an out-of-memory diagnostic, builds it, runs the
-mongoose library smoke tests against it, produces a portable replacement
-binary, verifies that the marker reached that binary, and confirms there is no
-dynamic libnfs dependency:
+`verify-relink.sh` copies the bundled libnfs source and makes a harmless but
+binary-visible change to an out-of-memory diagnostic. It builds that libnfs,
+then, from an empty and isolated Cargo home, runs the mongoose library smoke
+tests against it and produces a portable replacement binary. Finally it
+verifies that the marker reached that binary and that there is no dynamic
+libnfs dependency:
 
 ```sh
 ./verify-relink.sh --original /path/to/mongoose-linux-x86_64 \
