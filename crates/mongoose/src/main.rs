@@ -25,12 +25,23 @@ fn exit_code_for(outcome: ExitOutcome) -> ExitCode {
     }
 }
 
+/// Ask CPUID directly. `is_x86_feature_detected!` cannot answer this: every
+/// crate is built with `+aes,+sse2` (see `.cargo/config.toml`), so the macro
+/// folds to `true` at compile time.
+#[cfg(target_arch = "x86_64")]
+fn cpu_has_aes_ni() -> bool {
+    let leaf1 = std::arch::x86_64::__cpuid(1);
+    let aes = leaf1.ecx & (1 << 25) != 0;
+    let sse2 = leaf1.edx & (1 << 26) != 0;
+    aes && sse2
+}
+
 fn main() -> ExitCode {
     // The embedded walker routes paths with gxhash, which is compiled for
     // AES-NI and has no fallback: without it the first scan would die of
     // SIGILL. Refuse before doing anything else.
     #[cfg(target_arch = "x86_64")]
-    if !std::arch::is_x86_feature_detected!("aes") || !std::arch::is_x86_feature_detected!("sse2") {
+    if !cpu_has_aes_ni() {
         eprintln!(
             "error: mongoose needs an x86-64 CPU with AES-NI, and this CPU does not report it"
         );
