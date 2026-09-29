@@ -1,0 +1,132 @@
+# Baseline CI (PR-11A): formatting, Clippy, workspace tests, ShellCheck, and
+# the repository-level LGPL policy check.
+#
+# This workflow validates the checked-in workspace only. It never builds,
+# uploads, or publishes a release artifact.
+#
+# Every Cargo gate links a disposable static libnfs archive built from the
+# fork commit pinned in packaging/libnfs.lock.json; the distro libnfs-dev
+# lacks symbols mongoose needs. That archive's digest varies with Zig's
+# install path, so it is not compared with the locked release digest.
+# `make release` keeps enforcing the locked digest and the full LGPL gate.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  baseline:
+    name: baseline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      # Keep a cold workspace build within the runner's disk: CI gains
+      # nothing from incremental artifacts, and line tables keep backtrace
+      # locations without full debug info.
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install system tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends jq shellcheck
+          jq --version
+          shellcheck --version | sed -n 2p
+          cmake --version | head -n1
+          ar --version | head -n1
+          ranlib --version | head -n1
+
+      - name: Refuse a system libnfs
+        run: |
+          if dpkg-query -W -f='${Status}' libnfs-dev 2>/dev/null | grep -q 'install ok installed'; then
+            echo "::error::libnfs-dev is installed; CI must link the pinned libnfs fork"
+            exit 1
+          fi
+          if command -v pkg-config >/dev/null && pkg-config --exists libnfs; then
+            echo "::error::a system libnfs is visible to pkg-config; CI must link the pinned libnfs fork"
+            exit 1
+          fi
+
+      - name: Install locked Rust toolchain
+        run: |
+          rust=$(jq -r .rustc packaging/release-toolchain.lock.json)
+          cargo_version=$(jq -r .cargo packaging/release-toolchain.lock.json)
+          rustup toolchain install "$rust" --profile minimal --component rustfmt --component clippy
+          rustup default "$rust"
+          rustc --version
+          cargo --version
+          [[ "$(rustc --version)" == "rustc $rust "* ]] || { echo "::error::rustc is not $rust"; exit 1; }
+          [[ "$(cargo --version)" == "cargo $cargo_version "* ]] || { echo "::error::cargo is not $cargo_version"; exit 1; }
+
+      - name: Install locked Zig
+        run: |
+          zig_version=$(jq -r .zig packaging/release-toolchain.lock.json)
+          # SHA-256 of the official x86_64-linux tarball, from
+          # https://ziglang.org/download/index.json. Add the matching digest
+          # here whenever the lock's Zig version changes.
+          case "$zig_version" in
+            0.16.0) zig_sha256=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00 ;;
+            *) echo "::error::no pinned tarball digest for Zig $zig_version"; exit 1 ;;
+          esac
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/zig.tar.xz" \
+            "https://ziglang.org/download/$zig_version/zig-x86_64-linux-$zig_version.tar.xz"
+          echo "$zig_sha256  $RUNNER_TEMP/zig.tar.xz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP/zig" --strip-components=1
+          test "$("$RUNNER_TEMP/zig/zig" version)" = "$zig_version"
+          echo "Zig $zig_version"
+
+      - name: Build pinned libnfs (CI-only archive)
+        run: |
+          url=$(jq -r .source_url packaging/libnfs.lock.json)
+          sha=$(jq -r .source_git_sha packaging/libnfs.lock.json)
+          git init -q "$RUNNER_TEMP/libnfs"
+          git -C "$RUNNER_TEMP/libnfs" fetch --depth 1 "$url" "$sha"
+          git -C "$RUNNER_TEMP/libnfs" checkout -q FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/libnfs" rev-parse HEAD)" = "$sha"
+          echo "libnfs $url @ $sha"
+          # Deliberately no EXPECTED_LIBNFS_SHA256: see the header comment.
+          EXPECTED_ZIG_VERSION="$(jq -r .zig packaging/release-toolchain.lock.json)" \
+          ZIG="$RUNNER_TEMP/zig/zig" \
+          ./scripts/build-libnfs-static.sh \
+            --source "$RUNNER_TEMP/libnfs" \
+            --output "$RUNNER_TEMP/libnfs-stage"
+          echo "VAMOOSE_LIBNFS_DIR=$RUNNER_TEMP/libnfs-stage" >> "$GITHUB_ENV"
+          echo "NFS_WALKER_LIBNFS_DIR=$RUNNER_TEMP/libnfs-stage" >> "$GITHUB_ENV"
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+      - name: shellcheck
+        run: shellcheck scripts/*.sh packaging/relink-kit/*.sh
+
+      - name: make compliance-check
+        run: make compliance-check
+
+      - name: Disk usage
+        if: always()
+        run: df -h / "$RUNNER_TEMP"
