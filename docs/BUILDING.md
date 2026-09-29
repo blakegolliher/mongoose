@@ -80,10 +80,17 @@ cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.34 -p mongoose
 | `SHA256SUMS` | digests of every published release asset |
 
 Packages and the tarball are portable by default. `make rpm PORTABLE=0`
-packages a host build instead; do not ship those. A full release also requires
-clean local checkouts of libnfs and nfs-walker at their locked revisions,
-`cargo-about`, `cmake`, `rpmbuild`, `rpm`, `dpkg-deb`, `jq`, `objdump`,
-`readelf`, `cargo-zigbuild`, and Zig.
+packages a host build instead; do not ship those. Package and asset
+architecture labels come from the build target, not from the host. A full
+release also requires:
+
+- clean local checkouts of libnfs and nfs-walker at their locked revisions;
+- `cargo-about`, `cmake`, `rpmbuild`, `rpm`, `dpkg-deb`, `jq`, `objdump`,
+  `readelf`, `cargo-zigbuild`, and Zig, at exactly the versions in
+  `packaging/release-toolchain.lock.json`. `make toolchain-check` verifies them,
+  and every portable build runs that check first;
+- podman, with network access to pull the digest-pinned test images and
+  qemu-user.
 
 ## Cutting a release
 
@@ -94,11 +101,21 @@ clean local checkouts of libnfs and nfs-walker at their locked revisions,
    files. By default the Makefile expects sibling `../libnfs` and
    `../nfs-walker` directories; override `LIBNFS_SOURCE` and
    `NFS_WALKER_SOURCE` when needed.
-3. `cargo test -p mongoose`, then `make release`. The release command builds
-   the companion source and relink assets, performs an offline smoke test and
-   portable relink with a deliberately modified libnfs, inspects all package
-   contents, and fails closed before writing checksums if any compliance
-   requirement is absent.
+3. `cargo test -p mongoose`, then `make release` into an empty `DIST`. The
+   release command builds the companion source and relink assets, performs an
+   offline smoke test and portable relink with a deliberately modified libnfs,
+   inspects all package contents, and fails closed before writing checksums if
+   any compliance requirement is absent. It then runs
+   `scripts/check-release-artifacts.sh`, which fails the release unless all of
+   these hold:
+   - the bare binary depends only on libc and libm, uses glibc symbols no newer
+     than 2.34, and prints the right `--version` and `--help`;
+   - `SHA256SUMS` lists exactly the files in `DIST`, and they all verify;
+   - the RPM installs, runs, and uninstalls cleanly on Rocky Linux 9 (glibc
+     2.34), and the DEB does the same on Debian 12;
+   - the tarball and bare binary run on both of those systems;
+   - under qemu-user, the binary refuses to start on an emulated CPU without
+     AES-NI and starts on one with it.
 4. Commit, tag `vX.Y.Z`, push both.
 5. Upload every path recorded by `dist/SHA256SUMS`, plus `SHA256SUMS` itself.
    Never publish only the executable or packages.
