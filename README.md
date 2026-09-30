@@ -104,7 +104,7 @@ destination, or the source, and run `--cutover` again.
   unreachable server, not root) or, for `--cutover`, that the trees
   do not match. 2 means it finished but some files failed; the list is
   under `<work-dir>/failures/`, and the next `sync` retries them.
-- **Everything is preserved**: files, directories, symlinks,
+- **What is copied**: file contents, directories, symlinks,
   hardlinks, owner, mode, and file timestamps. For ownership to carry
   over, the destination export has to let root in (`no_root_squash`),
   and the source export has to let root read everything. Directory
@@ -116,9 +116,11 @@ destination, or the source, and run `--cutover` again.
   destination alone. Anything on the new server that is not on the old
   one, including those leftovers, makes `--cutover` fail until you
   remove it.
-- **Fifos, sockets, and device nodes are not copied.** `--cutover`
-  lists any it finds on the source; recreate them on the new server or
-  remove them from the old one.
+- **Fifos, sockets, and device nodes are not copied.** `copy` and
+  `sync` say how many they left out and list each one under
+  `<work-dir>/downgrades/`. `--cutover` fails until each exists on the
+  new server with the same type, or is gone from the old one: recreate
+  them yourself, or remove them.
 - **A scan that cannot read every directory fails.** Transient
   problems are retried; a directory the server will not list (for
   example one root cannot read) makes `copy` or `sync` stop with the

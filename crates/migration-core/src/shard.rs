@@ -294,6 +294,15 @@ fn extract_row(batch: &RecordBatch, row: usize) -> Result<RowView> {
     }
     let file_type = FileTypeTag::from_u8(file_type_u8);
 
+    // `mode` carries the type too, and the mover applies `mode` to the
+    // destination. A row whose two type fields disagree, or whose mode
+    // has no type at all, is corrupt; nothing here repairs it. This is
+    // the trust boundary: a hand-built or stale shard never passed
+    // through the rewrite's own check.
+    file_type
+        .check_mode(mode)
+        .map_err(|reason| Error::CorruptRow { row_id, reason })?;
+
     Ok(RowView {
         row_id,
         path,
@@ -784,6 +793,104 @@ mod tests {
         let reader = ShardReader::open(&path).unwrap();
         let mut it = reader.into_rows().unwrap();
         assert!(matches!(it.next(), Some(Err(Error::CorruptRow { .. }))));
+    }
+
+    /// A row for `tag` whose `mode` carries `type_bits`.
+    fn typed_row(i: u64, tag: FileTypeTag, type_bits: u32) -> TestRow {
+        TestRow {
+            mode: type_bits | 0o640,
+            file_type: tag as u8,
+            ..TestRow::ok(i)
+        }
+    }
+
+    #[test]
+    fn iterator_accepts_all_seven_types_with_matching_mode() {
+        let rows: Vec<TestRow> = FileTypeTag::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(i, tag)| typed_row(i as u64, tag, tag.mode_type_bits().unwrap()))
+            .collect();
+        let path = ShardWriter::new("part-seven.parquet").write(&rows);
+        let read: Vec<RowView> = ShardReader::open(&path)
+            .unwrap()
+            .into_rows()
+            .unwrap()
+            .collect::<Result<_>>()
+            .unwrap();
+        assert_eq!(read.len(), 7);
+        for (row, tag) in read.iter().zip(FileTypeTag::ALL) {
+            assert_eq!(row.file_type, tag);
+            assert_eq!(row.mode & schema::S_IFMT, tag.mode_type_bits().unwrap());
+            assert_eq!(row.mode & 0o7777, 0o640, "permission bits untouched");
+        }
+    }
+
+    /// Every disagreement between the tag and the mode's type bits is
+    /// corruption: all 42 off-diagonal pairs, not a sample.
+    #[test]
+    fn iterator_rejects_every_tag_mode_mismatch() {
+        for tag in FileTypeTag::ALL {
+            for other in FileTypeTag::ALL {
+                if other == tag {
+                    continue;
+                }
+                let bits = other.mode_type_bits().unwrap();
+                let name = format!("part-{}-{}.parquet", tag as u8, other as u8);
+                let path = ShardWriter::new(&name).write(&[typed_row(3, tag, bits)]);
+                let mut it = ShardReader::open(&path).unwrap().into_rows().unwrap();
+                match it.next() {
+                    Some(Err(Error::CorruptRow { row_id, reason })) => {
+                        assert_eq!(row_id, schema::make_row_id(0, 3));
+                        assert!(
+                            reason.contains(&format!("file_type={}", tag as u8))
+                                && reason.contains(tag.name())
+                                && reason.contains(other.name())
+                                && reason.contains(&format!("{:#o}", bits | 0o640)),
+                            "{tag:?} with {other:?} mode: {reason}"
+                        );
+                    }
+                    other_result => {
+                        panic!("{tag:?} with {other:?} mode: expected CorruptRow, got {other_result:?}")
+                    }
+                }
+            }
+        }
+    }
+
+    /// The two mismatches that matter most: a special node that would
+    /// be copied as file data, and a regular file that would be skipped.
+    #[test]
+    fn iterator_rejects_special_tag_with_regular_mode_and_the_reverse() {
+        for (tag, bits) in [
+            (FileTypeTag::Fifo, schema::S_IFREG),
+            (FileTypeTag::Socket, schema::S_IFREG),
+            (FileTypeTag::BlockDev, schema::S_IFREG),
+            (FileTypeTag::CharDev, schema::S_IFREG),
+            (FileTypeTag::Regular, schema::S_IFIFO),
+        ] {
+            let path = ShardWriter::new("part-swap.parquet").write(&[typed_row(0, tag, bits)]);
+            let mut it = ShardReader::open(&path).unwrap().into_rows().unwrap();
+            assert!(
+                matches!(it.next(), Some(Err(Error::CorruptRow { .. }))),
+                "{tag:?} with mode type bits {bits:#o}"
+            );
+        }
+    }
+
+    /// A mode with no type bits is rejected, not repaired from the tag.
+    #[test]
+    fn iterator_rejects_mode_without_type_bits() {
+        for tag in FileTypeTag::ALL {
+            let path = ShardWriter::new("part-notype.parquet").write(&[typed_row(0, tag, 0)]);
+            let mut it = ShardReader::open(&path).unwrap().into_rows().unwrap();
+            match it.next() {
+                Some(Err(Error::CorruptRow { reason, .. })) => {
+                    assert!(reason.contains("no recognized type"), "{tag:?}: {reason}");
+                }
+                other => panic!("{tag:?}: expected CorruptRow, got {other:?}"),
+            }
+        }
     }
 
     #[test]

@@ -1,8 +1,10 @@
 //! Per-file strategy selection.
 //!
 //! Decided per-file from the row kind, size, and hardlink state. Regular
-//! non-empty files use the libnfs data path; special rows use their existing
-//! metadata-only or skip paths.
+//! non-empty files use the libnfs data path; symlinks and directories use
+//! their metadata-only paths. Fifos, sockets, and device nodes are recognized
+//! and deliberately not created: that is an omission with its own strategy,
+//! counter, and durable record, never a generic skip.
 
 use migration_core::schema::FileTypeTag;
 use migration_core::shard::RowView;
@@ -27,8 +29,18 @@ pub enum Strategy {
     /// non-dir rows in the same shard so file commits don't
     /// restamp the dir's mtime; the shard processor enforces this.
     DirAttrs,
-    /// Skip — non-data entry (fifo, socket, dev).
-    Skip,
+    /// Fifo, socket, block device, or character device. The mover does
+    /// not create these, so the row is a processed **omission**: no
+    /// destination RPC, no bytes, a `SPECIAL_NOT_COPIED` downgrade record,
+    /// and `files_special_not_copied` instead of `files_ok`. Selected for
+    /// those four types only.
+    SpecialNotCopied,
+    /// The row has no canonical type. The shard reader rejects such a row
+    /// before it reaches the mover, so this is reachable only through a
+    /// row built by hand; it is a per-file failure. It is never treated as
+    /// a special node: an unimplemented or corrupt type must not hide
+    /// behind the omission path.
+    UnknownType,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -39,23 +51,25 @@ pub struct StrategyContext {
 }
 
 pub fn pick(row: &RowView, ctx: &StrategyContext) -> Strategy {
-    if !row.is_data_file() {
-        return match row.file_type {
-            FileTypeTag::Symlink => Strategy::Symlink,
-            FileTypeTag::Dir => Strategy::DirAttrs,
-            _ => Strategy::Skip,
-        };
+    // Exhaustive, with no wildcard: a tag added to `FileTypeTag` does not
+    // compile until it is given a strategy here.
+    match row.file_type {
+        FileTypeTag::Regular => {
+            if row.inode.is_some() && ctx.already_copied_inode {
+                Strategy::HardlinkExisting
+            } else if row.size == 0 {
+                Strategy::Empty
+            } else {
+                Strategy::LibnfsIoUring
+            }
+        }
+        FileTypeTag::Symlink => Strategy::Symlink,
+        FileTypeTag::Dir => Strategy::DirAttrs,
+        FileTypeTag::Fifo | FileTypeTag::Socket | FileTypeTag::BlockDev | FileTypeTag::CharDev => {
+            Strategy::SpecialNotCopied
+        }
+        FileTypeTag::Unknown => Strategy::UnknownType,
     }
-
-    if row.inode.is_some() && ctx.already_copied_inode {
-        return Strategy::HardlinkExisting;
-    }
-
-    if row.size == 0 {
-        return Strategy::Empty;
-    }
-
-    Strategy::LibnfsIoUring
 }
 
 #[cfg(test)]
@@ -128,16 +142,62 @@ mod tests {
     }
 
     #[test]
-    fn non_data_rows_pick_skip() {
+    fn the_four_special_types_pick_special_not_copied() {
         for file_type in [
-            FileTypeTag::Unknown,
             FileTypeTag::Fifo,
             FileTypeTag::Socket,
             FileTypeTag::BlockDev,
             FileTypeTag::CharDev,
         ] {
-            let r = row(4096, file_type);
-            assert_eq!(pick(&r, &ctx(false)), Strategy::Skip);
+            // Whatever the size or hardlink state says.
+            for (size, inode, copied) in [(0, None, false), (4096, Some(7), true)] {
+                let mut r = row(size, file_type);
+                r.inode = inode;
+                assert_eq!(
+                    pick(&r, &ctx(copied)),
+                    Strategy::SpecialNotCopied,
+                    "{file_type:?}"
+                );
+            }
         }
+    }
+
+    /// `SpecialNotCopied` is for the four special types and nothing
+    /// else. Every other tag, `Unknown` included, gets its own strategy.
+    #[test]
+    fn nothing_but_a_special_type_picks_special_not_copied() {
+        for file_type in [
+            FileTypeTag::Unknown,
+            FileTypeTag::Regular,
+            FileTypeTag::Dir,
+            FileTypeTag::Symlink,
+        ] {
+            for size in [0, 4096] {
+                for copied in [false, true] {
+                    let mut r = row(size, file_type);
+                    r.inode = Some(9);
+                    assert_ne!(
+                        pick(&r, &ctx(copied)),
+                        Strategy::SpecialNotCopied,
+                        "{file_type:?} size={size} copied={copied}"
+                    );
+                }
+            }
+        }
+        for file_type in FileTypeTag::ALL {
+            assert_eq!(
+                pick(&row(1, file_type), &ctx(false)) == Strategy::SpecialNotCopied,
+                file_type.is_special(),
+                "{file_type:?}"
+            );
+        }
+    }
+
+    /// An untyped row is a failure, not an omission.
+    #[test]
+    fn unknown_type_is_never_skipped() {
+        let r = row(4096, FileTypeTag::Unknown);
+        assert_eq!(pick(&r, &ctx(false)), Strategy::UnknownType);
+        assert_eq!(pick(&r, &ctx(true)), Strategy::UnknownType);
     }
 }

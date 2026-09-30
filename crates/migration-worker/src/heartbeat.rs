@@ -122,6 +122,9 @@ pub struct LivePending {
     pub files_ok: std::sync::atomic::AtomicU64,
     pub files_failed: std::sync::atomic::AtomicU64,
     pub files_fenced: std::sync::atomic::AtomicU64,
+    /// Special nodes recognized and not created. Counted in
+    /// `rows_done`, never in `files_ok`.
+    pub files_special_not_copied: std::sync::atomic::AtomicU64,
 }
 
 impl LivePending {
@@ -141,6 +144,7 @@ impl LivePending {
         self.files_ok.store(0, Relaxed);
         self.files_failed.store(0, Relaxed);
         self.files_fenced.store(0, Relaxed);
+        self.files_special_not_copied.store(0, Relaxed);
     }
 }
 
@@ -155,6 +159,8 @@ pub struct ProgressState {
     pub files_failed: u64,
     /// R8 hits — rows whose commit was short-circuited by a fence trip.
     pub files_fenced: u64,
+    /// Special nodes recognized and not created, across shards.
+    pub files_special_not_copied: u64,
     pub status: String,
 }
 
@@ -169,6 +175,7 @@ impl ProgressState {
             files_ok: 0,
             files_failed: 0,
             files_fenced: 0,
+            files_special_not_copied: 0,
             status: "starting".to_string(),
         }
     }
@@ -491,6 +498,9 @@ impl HeartbeatTask {
             files_fenced: snap
                 .files_fenced
                 .saturating_add(live.files_fenced.load(Relaxed)),
+            files_special_not_copied: snap
+                .files_special_not_copied
+                .saturating_add(live.files_special_not_copied.load(Relaxed)),
             throughput_mb_s_1m: throughput_mb_s,
             status: status.to_string(),
             latency: migration_core::latency::latest(),
@@ -787,6 +797,80 @@ mod tests {
         })
         .await
         .unwrap_or_else(|_| panic!("timed out waiting for counter to reach {n}"));
+    }
+
+    // -------------------------------------------------------------------------
+    // 0. The progress record: durable totals plus the live shard, once each.
+    // -------------------------------------------------------------------------
+
+    /// Special nodes the mover left out reach the heartbeat's progress
+    /// record as their own counter: the shards already merged plus the
+    /// shard in flight. They are in `shard_rows_done` and in no other
+    /// file counter.
+    #[tokio::test(start_paused = true)]
+    async fn progress_record_carries_special_not_copied_without_double_counting() {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        let store = Arc::new(TestStore::new());
+        let etag = acquire_claim(&store).await;
+        let fence = Fence::new();
+        let current = Arc::new(Mutex::new(Some(held(&etag))));
+        *store.cell.lock().unwrap() = Some(current.clone());
+
+        // Two earlier shards are merged; a third is in flight.
+        let mut merged = ProgressState::new();
+        merged.files_ok = 100;
+        merged.files_failed = 2;
+        merged.files_special_not_copied = 3;
+        merged.shard_rows_done = 0;
+        let live = Arc::new(LivePending::default());
+        live.rows_done.store(7, Relaxed);
+        live.files_ok.store(4, Relaxed);
+        live.files_failed.store(1, Relaxed);
+        live.files_special_not_copied.store(2, Relaxed);
+        live.bytes_moved.store(4096, Relaxed);
+
+        let task = HeartbeatTask {
+            live: Arc::clone(&live),
+            store: store.clone() as Arc<dyn ClaimStore>,
+            fence: fence.clone(),
+            host_id: HOST.to_string(),
+            interval: Duration::from_secs(10),
+            coord_fence: None,
+            lease_timeout: Duration::from_secs(60),
+            current,
+            progress: Arc::new(RwLock::new(merged)),
+            throughput: ThroughputCounter::new(),
+            throughput_window_secs: 60,
+            clock: Arc::new(TestClock::new()),
+        };
+        let handle = tokio::spawn(task.run());
+        wait_for(&store.progress_puts, 1).await;
+
+        let p = last_progress(&store)
+            .await
+            .expect("a progress record was written");
+        assert_eq!(p.files_special_not_copied, 5, "3 merged + 2 live");
+        assert_eq!(p.files_ok, 104, "omissions are not in files_ok");
+        assert_eq!(p.files_failed, 3, "or in files_failed");
+        assert_eq!(
+            p.shard_rows_done, 7,
+            "4 ok + 1 failed + 2 special in this shard"
+        );
+        assert_eq!(p.shard_bytes_done, 4096);
+
+        // The orchestrator's shard-end merge resets the live set first;
+        // the next record must not count the same shard twice.
+        live.reset();
+        assert_eq!(live.files_special_not_copied.load(Relaxed), 0);
+        let puts = store.progress_puts.load(Ordering::SeqCst);
+        wait_for(&store.progress_puts, puts + 1).await;
+        let p = last_progress(&store).await.unwrap();
+        assert_eq!(p.files_special_not_copied, 3);
+        assert_eq!(p.files_ok, 100);
+
+        fence.trip("test done");
+        let _ = handle.await;
     }
 
     // -------------------------------------------------------------------------

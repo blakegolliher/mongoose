@@ -373,10 +373,21 @@ pub async fn run(args: &SyncArgs) -> Result<SyncOutcome> {
             v.content.bytes_read,
             pass_wd.verify_json().display(),
         ),
-        (Some(c), None) => println!(
-            "\nsync pass {pass} complete: {} copied, {} failed, {} bytes{deleted_note}",
-            c.files_ok, c.files_failed, c.bytes_moved
-        ),
+        (Some(c), None) => {
+            // Special nodes are neither copied nor failed; say so here
+            // too, so the pass summary cannot read as "everything is
+            // on the destination".
+            let special_note = if c.files_special_not_copied > 0 {
+                format!(", {} special NOT copied", c.files_special_not_copied)
+            } else {
+                String::new()
+            };
+            println!(
+                "\nsync pass {pass} complete: {} copied, {} failed{special_note}, {} bytes\
+                 {deleted_note}",
+                c.files_ok, c.files_failed, c.bytes_moved
+            )
+        }
         (None, None) => println!("\nsync pass {pass} complete: source unchanged{deleted_note}"),
     }
     Ok(outcome)

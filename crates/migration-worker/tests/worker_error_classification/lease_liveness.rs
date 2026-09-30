@@ -88,6 +88,7 @@ async fn seed_progress(store: &FakeStore, held_etag: &str, heartbeat_age_sec: i6
         files_ok: 1,
         files_failed: 0,
         files_fenced: 0,
+        files_special_not_copied: 0,
         throughput_mb_s_1m: 1.0,
         status: "active".into(),
         held_etag: Some(held_etag.into()),

@@ -119,12 +119,11 @@ pub fn type_name(t: FileTypeTag) -> &'static str {
     }
 }
 
-/// Fifo, socket, or device node: the mover's `Strategy::Skip`.
+/// Fifo, socket, or device node: what the mover recognizes and does
+/// not create (`Strategy::SpecialNotCopied`). One definition, in
+/// `migration-core`.
 pub fn is_special(t: FileTypeTag) -> bool {
-    matches!(
-        t,
-        FileTypeTag::Fifo | FileTypeTag::Socket | FileTypeTag::BlockDev | FileTypeTag::CharDev
-    )
+    t.is_special()
 }
 
 /// The contract, applied to one path present on both sides. Pure.
@@ -135,7 +134,10 @@ pub fn is_special(t: FileTypeTag) -> bool {
 ///   queued only when the sizes agree (a metadata mismatch does not
 ///   suppress the content check, so one run reports everything).
 /// - Directories and special files: mode and owner. Directory mtimes
-///   are outside the contract (see the module docs).
+///   are outside the contract (see the module docs). A special file
+///   reaches this comparison only when the destination has an entry
+///   of the same type at that path, which an operator created:
+///   mongoose does not. It then matches like any other entry.
 /// - Symlinks: the target is queued for READLINK; NFSv3 cannot set a
 ///   symlink's own mode/owner/times, so none is compared.
 pub fn compare(src: &Entry, dst: &Entry, c: Contract) -> Compared {
@@ -518,7 +520,9 @@ pub(crate) mod tests {
             path: path.to_vec(),
             file_type,
             size,
-            mode: 0o100644,
+            // The type bits follow the tag: the shard reader rejects a
+            // row whose mode says a different type.
+            mode: file_type.mode_type_bits().unwrap_or(0) | 0o644,
             uid: Some(1000),
             gid: Some(1000),
             mtime: Some((1_700_000_000, 123_456_789)),
@@ -827,8 +831,7 @@ pub(crate) mod tests {
         ];
         let mut small_d = small.clone();
         small_d.mode = 0o100644;
-        let mut typed_d = file(b"/typed", 4);
-        typed_d.file_type = FileTypeTag::Dir;
+        let typed_d = entry(b"/typed", FileTypeTag::Dir, 4);
         let dst = vec![vec![
             file(b"/a", 10),
             dir_a,
@@ -905,6 +908,116 @@ pub(crate) mod tests {
         // A complete checkpoint is reused verbatim.
         let again = ensure(&pass_wd, &[], &[], Contract::strict(), 3).unwrap();
         assert_eq!(again.counts, out.counts);
+    }
+
+    // ---- special nodes: the cutover rule ------------------------------
+
+    const SPECIAL: [FileTypeTag; 4] = [
+        FileTypeTag::Fifo,
+        FileTypeTag::Socket,
+        FileTypeTag::BlockDev,
+        FileTypeTag::CharDev,
+    ];
+
+    fn join(src: Vec<Entry>, dst: Vec<Entry>) -> (NamespaceCounts, Vec<Mismatch>, Vec<TodoEntry>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let pass_wd = WorkDir::new(tmp.path().join("pass"));
+        let s = shards(tmp.path(), "src", &[src]);
+        let d = shards(tmp.path(), "dst", &[dst]);
+        let out = ensure(&pass_wd, &s, &d, Contract::strict(), 4).unwrap();
+        let todo = TodoReader::open(&pass_wd.verify_dir().join(TODO_FILE))
+            .unwrap()
+            .map(|e| e.unwrap())
+            .collect();
+        (out.counts, read_mismatches(&pass_wd), todo)
+    }
+
+    /// A special node absent from the destination is exactly one
+    /// `special_not_copied` mismatch, with its raw path, for each of
+    /// the four types. Any such mismatch fails the cutover.
+    #[test]
+    fn each_missing_special_node_is_one_special_not_copied_with_its_raw_path() {
+        for tag in SPECIAL {
+            let path: &[u8] = b"/nodes/n-\xff";
+            let (counts, recs, todo) = join(
+                vec![file(b"/ok", 0), entry(path, tag, 0)],
+                vec![file(b"/ok", 0)],
+            );
+            assert_eq!(counts.special_not_copied, 1, "{tag:?}");
+            assert_eq!(counts.missing, 0, "{tag:?}: not reported as plain missing");
+            assert_eq!(counts.mismatches, 1, "{tag:?}: exactly one record");
+            assert_eq!(recs.len(), 1, "{tag:?}");
+            assert_eq!(recs[0].kind, MismatchKind::SpecialNotCopied, "{tag:?}");
+            assert_eq!(recs[0].kind.as_str(), "special_not_copied", "{tag:?}");
+            assert_eq!(recs[0].path().unwrap(), path, "{tag:?}: raw bytes");
+            assert_eq!(
+                recs[0].expected.as_deref(),
+                Some(type_name(tag)),
+                "{tag:?}: names the node to recreate"
+            );
+            assert!(todo.is_empty(), "{tag:?}: nothing to read back");
+        }
+    }
+
+    /// An operator recreated the node: a destination entry of the same
+    /// special type is not `special_not_copied`, and with matching mode
+    /// and owner it is a clean match.
+    #[test]
+    fn a_recreated_special_node_of_the_same_type_matches() {
+        for tag in SPECIAL {
+            let (counts, recs, todo) =
+                join(vec![entry(b"/node", tag, 0)], vec![entry(b"/node", tag, 0)]);
+            assert_eq!(counts.special_not_copied, 0, "{tag:?}");
+            assert_eq!(counts.matched, 1, "{tag:?}");
+            assert_eq!(counts.mismatches, 0, "{tag:?}");
+            assert!(recs.is_empty(), "{tag:?}: {recs:?}");
+            assert!(todo.is_empty(), "{tag:?}: special nodes have no content");
+        }
+    }
+
+    /// Recreated with the wrong mode or owner: the enforced attribute
+    /// checks still apply, and it is still not `special_not_copied`.
+    #[test]
+    fn a_recreated_special_node_is_still_checked_for_mode_and_owner() {
+        for tag in SPECIAL {
+            let mut wrong_mode = entry(b"/node", tag, 0);
+            wrong_mode.mode = tag.mode_type_bits().unwrap() | 0o600;
+            let (counts, recs, _) = join(vec![entry(b"/node", tag, 0)], vec![wrong_mode]);
+            assert_eq!(counts.special_not_copied, 0, "{tag:?}");
+            assert_eq!(counts.mode, 1, "{tag:?}");
+            assert_eq!(recs.len(), 1, "{tag:?}");
+            assert_eq!(recs[0].kind, MismatchKind::Mode, "{tag:?}");
+
+            let mut wrong_owner = entry(b"/node", tag, 0);
+            wrong_owner.uid = Some(0);
+            let (counts, recs, _) = join(vec![entry(b"/node", tag, 0)], vec![wrong_owner]);
+            assert_eq!(counts.special_not_copied, 0, "{tag:?}");
+            assert_eq!(counts.owner, 1, "{tag:?}");
+            assert_eq!(recs[0].kind, MismatchKind::Owner, "{tag:?}");
+        }
+    }
+
+    /// A regular file sitting where the source has a special node is a
+    /// type mismatch: not `special_not_copied`, and no content is read.
+    /// Likewise for a node of a different special type.
+    #[test]
+    fn a_wrong_type_at_a_special_path_is_a_file_type_mismatch() {
+        for tag in SPECIAL {
+            let other_special = SPECIAL.into_iter().find(|t| *t != tag).unwrap();
+            for wrong in [FileTypeTag::Regular, FileTypeTag::Dir, other_special] {
+                let (counts, recs, todo) = join(
+                    vec![entry(b"/node", tag, 0)],
+                    vec![entry(b"/node", wrong, 7)],
+                );
+                assert_eq!(counts.file_type, 1, "{tag:?} vs {wrong:?}");
+                assert_eq!(counts.special_not_copied, 0, "{tag:?} vs {wrong:?}");
+                assert_eq!(counts.mismatches, 1, "{tag:?} vs {wrong:?}");
+                assert_eq!(recs[0].kind, MismatchKind::FileType, "{tag:?} vs {wrong:?}");
+                assert_eq!(recs[0].expected.as_deref(), Some(type_name(tag)));
+                assert_eq!(recs[0].actual.as_deref(), Some(type_name(wrong)));
+                assert!(todo.is_empty(), "{tag:?} vs {wrong:?}: no content work");
+            }
+        }
     }
 
     #[test]

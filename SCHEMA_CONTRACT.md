@@ -88,7 +88,7 @@ mover refuses to read shards missing any of these.
 | `row_id` | `UInt64` | No | Globally unique row identifier within a single run. **Materialized at write time.** Format: `(shard_idx << 40) \| row_in_shard`. Shard index uses the high 24 bits, row offset the low 40. **Not stable across runs** of the same scan — re-walking the same source produces fresh `row_id` values. Cross-run identity uses `path` or `(fsid, inode)`. **Never derived at read time** — predicate pushdown can reorder rows. |
 | `path` | `Binary` | No | Path within the export, **relative to the export root, with leading slash**. Example: `b"/m2-verify/large.bin"` for a file at `/bgolliher/vamoose-source/m2-verify/large.bin` in an export rooted at `/bgolliher/vamoose-source`. Encoded as raw POSIX bytes, not UTF-8. May contain non-UTF-8 sequences. The kernel has no charset opinion on filenames; readers must not impose one. The export root is documented in `manifest.source.root`. |
 | `size` | `UInt64` | No | File logical size in bytes. **Advisory** — see "Size semantics" below. `0` for empty files, dirs, special files, symlinks (link target text length is not used). |
-| `mode` | `UInt32` | No | POSIX mode bits including type bits (`S_IFMT`). E.g. `0o100644` for a regular file with rw-r--r--. Includes the type bits — readers may derive `file_type` from `mode & S_IFMT` if needed but must not rely on it; use `file_type` instead. |
+| `mode` | `UInt32` | No | POSIX mode bits including type bits (`S_IFMT`). E.g. `0o100644` for a regular file with rw-r--r--. The type bits **must agree with `file_type`** (table under "FileTypeTag values"): the mover's shard reader rejects a row whose `mode & S_IFMT` is not the value its `file_type` requires, or is no recognized type at all, as shard corruption. Use `file_type` to branch on the type. |
 | `file_type` | `UInt8` | No | `FileTypeTag` enum value (1-7). **`Unknown = 0` MUST NOT appear in parquet** — see "FileTypeTag values". |
 
 ### POSIX attributes
@@ -189,7 +189,14 @@ mode it cannot classify, it logs a WARN, increments a per-scan
 counter, skips the entry, and surfaces the count in its scan summary.
 
 The mover treats `Unknown = 0` in parquet as shard corruption:
-`Error::ShardCorrupt` with the offending row identified.
+`Error::ShardCorrupt` with the offending row identified. So is a value
+above 7, and so is a row whose `mode & S_IFMT` does not match its
+`file_type` per the table above. Nothing is repaired or guessed; in
+particular no such row is ever treated as `Regular`.
+
+`Fifo`, `Socket`, `BlockDev`, and `CharDev` rows are valid. The mover
+does not create those nodes on the destination; see "Special nodes"
+under "Null attribute semantics".
 
 ---
 
@@ -272,6 +279,31 @@ A **downgrade record** is a JSON line written to `downgrades/host-<id>.jsonl`
 
 The file copy still succeeds and counts as `files_ok`. Downgrades are
 discoverable post-run without polluting the failure rate metric.
+
+### Special nodes
+
+A fifo, socket, block device, or character device row is recognized
+and **not copied**: the mover creates no destination entry, issues no
+RPC for the row, and moves no bytes. It writes one downgrade record:
+
+```json
+{
+  "row_id": 17592186049322,
+  "shard":  "part-r01-00000.parquet",
+  "path_b64": "...",
+  "downgrade": {"SPECIAL_NOT_COPIED": {"node": "fifo"}},
+  "ts": "2026-05-02T10:55:33Z"
+}
+```
+
+`node` is `fifo`, `socket`, `block_dev`, or `char_dev`. Unlike every
+other downgrade, the destination entry does **not** exist, and the row
+does **not** count as `files_ok`. It counts as
+`files_special_not_copied`: a processed row that is neither a copied
+file nor a failure. It completes its shard, is not retried, and stays
+out of the failure rate. Cutover verification reports it as
+`special_not_copied` until the destination holds a node of the same
+type at that path or the source entry is gone.
 
 ---
 

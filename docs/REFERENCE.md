@@ -44,7 +44,9 @@ verification advances the baseline.
   manifest.json                 run plan (shard list, totals)
   progress.json                 copy progress + completed-shard list
   failures/part-NNNN.jsonl      per-file failures, per shard
-  downgrades/part-NNNN.jsonl    per-file metadata downgrades, per shard
+  downgrades/part-NNNN.jsonl    per-file metadata downgrades, per shard, and
+                                one SPECIAL_NOT_COPIED record for every fifo,
+                                socket, or device node that was not copied
   baseline.json                 which pass the next sync diffs against
   passes/pass-NNNN/             one sync pass: same layout as above, plus
     classify/                   keep lists, deleted.jsonl, classify.json
@@ -116,6 +118,19 @@ pruned; delete them by hand once their reports are no longer needed.
   first row is fully published before the rest link to it.
 - Failures and downgrades are separate JSONL streams, written after
   every shard.
+- A fifo, socket, or device node is recognized and **not copied**.
+  It is neither a copied file nor a failure: `copy` and `sync` count
+  it as `special NOT copied`, record it in
+  `downgrades/part-NNNN.jsonl` as `SPECIAL_NOT_COPIED` with the node
+  kind and the raw path (base64), complete the shard, and do not
+  retry it. `progress.json` carries the total as
+  `files_special_not_copied`. The final summary prints the count and
+  where the records are. `copy` and a plain `sync` still exit 0;
+  `sync --cutover` fails while any such node is missing from the
+  destination.
+- An entry whose type the scan could not establish is never copied as
+  a file and never skipped: the scan fails as incomplete. A shard
+  whose type and mode disagree is rejected as corrupt.
 
 ## Excludes
 
@@ -254,7 +269,7 @@ What is compared, per entry present in the source index:
 | file      | present on the destination, same type, size, mode bits (`mode & 07777`), owner, mtime (to the microsecond `utimes` carries), and SHA-256 of the bytes |
 | directory | present, same type, mode bits, owner |
 | symlink   | present, same type, target bytes |
-| fifo, socket, device | reported as `special_not_copied`; mongoose does not copy them, so they can never match. Recreate them on the destination or remove them from the source |
+| fifo, socket, device | mongoose does not copy these. One that is missing from the destination is reported as `special_not_copied` and fails the cutover. One you recreated on the destination with the same type matches, and is then checked like a directory: type, mode bits, owner. A different type at that path is a `file_type` mismatch. To clear the report, recreate the node on the destination or remove it from the source |
 
 and every destination path must exist in the source; an extra fails,
 including entries the no-delete policy left behind and any stale
@@ -311,8 +326,12 @@ is not detected.
 - A directory whose children land in a different shard can end with a
   bumped mtime; the migration root itself is re-stamped at the end of
   a complete run. Directory mtimes are outside the cutover contract.
-- Fifos, sockets, and device nodes are not copied; cutover reports
-  them.
+- Fifos, sockets, and device nodes are not copied. Every one is
+  counted and recorded (see [Correctness posture](#correctness-posture)), and cutover fails until it
+  exists on the destination with the same type or is gone from the
+  source. mongoose never creates one: doing that safely needs decisions
+  about privileges, device numbers, and socket ownership that belong to
+  the operator.
 - Single host, NFSv3 via libnfs only, Linux, root.
 
 ## Exit codes
