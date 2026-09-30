@@ -711,6 +711,15 @@ During the readiness review:
 
 ---
 
+## Additional migration-correctness handoffs
+
+The post-review special-file/type-safety slice has a dedicated implementation
+guide in `docs/SPECIAL_FILE_TYPE_SAFETY_HANDOFF.md`. It covers exhaustive
+walker-to-canonical type translation, fail-closed type/mode validation,
+truthful special-node omission records and counters, cutover behavior, and
+real-NFS qualification. Its hardlink-safety merge prerequisite was resolved on
+2026-09-30 (nfs-walker PR #15, mongoose PR #17).
+
 ## Production release exit criteria
 
 The release owner can remove the block only when all of the following are true:
