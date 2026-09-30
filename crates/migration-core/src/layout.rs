@@ -100,7 +100,7 @@ pub fn failures_flush_key(host_id: &str, shard_filename: &str, epoch: u64) -> St
 ///
 /// A downgrade is a successful copy that had to drop a piece of
 /// metadata the user asked for — e.g. null source mtime, or a
-/// hardlink group falling back to `inode`-only because `fsid` was
+/// hardlink group copied as independent files because `fsid` was
 /// null. See SCHEMA_CONTRACT.md "Null attribute semantics". Key
 /// scheme rationale is identical to [`failures_flush_key`].
 pub fn downgrades_flush_key(host_id: &str, shard_filename: &str, epoch: u64) -> String {

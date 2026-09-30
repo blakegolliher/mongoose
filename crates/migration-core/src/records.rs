@@ -280,8 +280,10 @@ pub enum DowngradeKind {
     NullAtime,
     /// Source `uid` or `gid` was null; mover skipped chown.
     NullOwner,
-    /// Hardlink grouping fell back to inode-only because `fsid` was
-    /// null. Per shard, only the first occurrence emits a record.
+    /// Hardlink grouping was disabled because `fsid` was null. The files are
+    /// copied independently rather than risk linking equal inodes from
+    /// different filesystems. Per shard, only the first occurrence emits a
+    /// record.
     FsidUngrouped,
     /// Symlink mode bits could not be preserved because the destination
     /// uses NFSv3 (`nfs_chmod` follows symlinks; there is no

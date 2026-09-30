@@ -775,7 +775,7 @@ pub async fn run_with_stop(
             inflight: inflight.clone(),
             failures: failures.clone(),
             throughput: throughput.clone(),
-            fsid_fallback_warned: false,
+            fsid_ungrouped_warned: false,
             emitter: event_emitter.clone(),
             run_control: coord_handle.as_ref().map(|h| h.run_control.subscribe()),
             stop: stop.clone(),
