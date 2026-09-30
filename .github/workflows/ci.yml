@@ -114,6 +114,20 @@ jobs:
           echo "VAMOOSE_LIBNFS_DIR=$RUNNER_TEMP/libnfs-stage" >> "$GITHUB_ENV"
           echo "NFS_WALKER_LIBNFS_DIR=$RUNNER_TEMP/libnfs-stage" >> "$GITHUB_ENV"
 
+      - name: Check declared minimum Rust version
+        run: |
+          msrv=$(sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n1)
+          test -n "$msrv"
+          rustup toolchain install "$msrv" --profile minimal
+          rustc "+$msrv" --version
+          [[ "$(rustc "+$msrv" --version)" == "rustc $msrv "* ]] || {
+            echo "::error::rustc is not declared MSRV $msrv"
+            exit 1
+          }
+          CARGO_TARGET_DIR="$RUNNER_TEMP/msrv-target" \
+            cargo "+$msrv" check --workspace --all-targets --locked
+          cargo "+$msrv" clean --target-dir "$RUNNER_TEMP/msrv-target"
+
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
