@@ -2473,7 +2473,7 @@ dependencies = [
 [[package]]
 name = "nfs-walker"
 version = "0.2.0"
-source = "git+https://github.com/blakegolliher/nfs-walker?rev=360ad3fc15120663d182d1aebd884f20d5bfe872#360ad3fc15120663d182d1aebd884f20d5bfe872"
+source = "git+https://github.com/blakegolliher/nfs-walker?rev=86d7d0a8c9996ce9fe6a17e669a0e1f322b84d0e#86d7d0a8c9996ce9fe6a17e669a0e1f322b84d0e"
 dependencies = [
  "anyhow",
  "arrow",
@@ -3347,7 +3347,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

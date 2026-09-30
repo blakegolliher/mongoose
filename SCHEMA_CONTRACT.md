@@ -101,9 +101,9 @@ mover refuses to read shards missing any of these.
 | `atime_nsec` | `Int32` | Yes | atime nanoseconds. May be null. |
 | `uid` | `UInt32` | Yes | Owner user ID. Null if walker could not determine. |
 | `gid` | `UInt32` | Yes | Owner group ID. Null if walker could not determine. |
-| `nlink` | `UInt32` | Yes | Hard link count. Files with `nlink > 1` participate in hardlink groups (see `inode` and `fsid`). |
+| `nlink` | `UInt32` | Yes | Hard link count. Files with `nlink > 1` participate in hardlink groups only when both `inode` and `fsid` are present. |
 | `inode` | `UInt64` | Yes | Source filesystem inode number. Used **with `fsid`** to identify hardlink groups. Inode numbers are only unique within a single filesystem; `(fsid, inode)` is the canonical hardlink key. Null only if walker could not determine. |
-| `fsid` | `UInt64` | Yes | Source filesystem identifier from the file handle's post-op attributes. Combined with `inode` to disambiguate hardlinks across underlying filesystems within an export. Null when walker can't determine; mover falls back to grouping by `inode` alone with a one-time WARN at shard open. |
+| `fsid` | `UInt64` | Yes | Source filesystem identifier from the file handle's post-op attributes. Combined with `inode` to disambiguate hardlinks across underlying filesystems within an export. Null when walker can't determine; mover copies affected entries independently with a one-time WARN and downgrade record rather than risk linking unrelated files. |
 
 ---
 
@@ -139,6 +139,7 @@ the analytics dashboard. **New consumers must not read these.**
 | `path_bytes` | `Binary` | Transitional walker column containing the exact absolute path bytes, including the export-root prefix. The rewrite shim prefers this over the legacy UTF-8 path; native canonical walker output will replace it with canonical relative `path`. |
 | `filename_bytes` | `Binary` | Exact basename bytes for the walker analytics schema. |
 | `parent_path_bytes` | `Binary` | Exact absolute parent-directory bytes for the walker analytics schema. |
+| `fsid` | `UInt64` (nullable) | Source filesystem identifier from NFS post-op attributes. The rewrite shim carries it into the canonical `fsid` column. Absent in older walker shards. |
 | `scan_id` | `Utf8` | Walker scan UUID. |
 | `scan_timestamp_us` | `Int64` | Walker start time. |
 | `checksum` | `Utf8` (nullable) | gxhash, when walker `-c` flag is used. |
@@ -253,7 +254,7 @@ following rules:
 | `uid` / `gid` | Skip `chown`. Write a downgrade record. |
 | `mode` | Cannot occur — `mode` is non-null per contract. Mover treats as shard corruption if it does. |
 | `inode` | Treat as not part of any hardlink group. File is copied whole. |
-| `fsid` | Fall back to grouping by `inode` alone, with one-time WARN at shard open. |
+| `fsid` | Do not group by inode alone. Copy affected entries independently, with a one-time WARN and `FsidUngrouped` downgrade record per shard. This may lose hardlink topology but cannot link unrelated files from different filesystems. |
 | `nlink` | Treat as `1` (assume not hardlinked). |
 
 A **downgrade record** is a JSON line written to `downgrades/host-<id>.jsonl`

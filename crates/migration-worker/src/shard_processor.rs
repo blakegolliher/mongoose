@@ -26,8 +26,9 @@
 //! The per-group sequential dispatch keeps hardlink fidelity without
 //! a shared mutable map: the group leader copies; subsequent rows
 //! `nfs_link` against the leader's path. The processor still emits
-//! the one-shot `FsidUngrouped` downgrade per shard for any row whose
-//! `inode` is set but `fsid` is not.
+//! the one-shot `FsidUngrouped` downgrade per shard for hardlinked rows
+//! whose `inode` is set but `fsid` is not. Such rows are copied
+//! independently because inode-only grouping is unsafe across filesystems.
 //!
 //! Cross-shard hardlinks remain out of scope for v1.
 //!
@@ -71,10 +72,8 @@ use std::sync::Arc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-/// Hardlink-map key. `None` for fsid means the source row didn't carry
-/// one; the worker falls back to inode-only grouping (with a one-time
-/// WARN + downgrade per shard, emitted on first occurrence).
-type HardlinkKey = (Option<u64>, u64);
+/// Filesystem-scoped hardlink-map key.
+type HardlinkKey = (u64, u64);
 
 pub struct ShardProcessor {
     pub mover: Arc<dyn FileMover>,
@@ -95,9 +94,9 @@ pub struct ShardProcessor {
     /// mtimes correct at shard scope (cross-shard children remain the
     /// documented caveat).
     pub dir_restamp: Vec<RowView>,
-    /// Set true the first time we see an `inode`-bearing row with no
+    /// Set true the first time we see a hardlinked, inode-bearing row with no
     /// `fsid`; gates the one-shot WARN + `FsidUngrouped` downgrade.
-    pub fsid_fallback_warned: bool,
+    pub fsid_ungrouped_warned: bool,
     /// Coord event emitter. Disabled in legacy S3-only mode (every
     /// call is a no-op); when enabled, `record_outcome` pushes a
     /// `WorkerEventDraft` per file outcome so the coord_driver can
@@ -119,7 +118,7 @@ impl ShardProcessor {
         tracing::info!(parquet = %parquet_path.display(), total_rows = total, "shard opened");
 
         // Per-shard state reset.
-        self.fsid_fallback_warned = false;
+        self.fsid_ungrouped_warned = false;
         self.dir_restamp.clear();
 
         let mut current = Batch::default();
@@ -272,14 +271,18 @@ impl ShardProcessor {
                 dirs.push(row);
                 continue;
             }
-            match hardlink_key(&row) {
-                Some(key) if row.nlink.unwrap_or(1) > 1 => {
-                    if matches!(key, (None, _)) {
-                        self.maybe_emit_fsid_fallback_warning(&row);
+            if row.nlink.unwrap_or(1) > 1 {
+                match hardlink_key(&row) {
+                    Some(key) => groups.entry(key).or_default().push(row),
+                    None => {
+                        if row.inode.is_some() && row.fsid.is_none() {
+                            self.maybe_emit_fsid_ungrouped_warning(&row);
+                        }
+                        singletons.push(row);
                     }
-                    groups.entry(key).or_default().push(row);
                 }
-                _ => singletons.push(row),
+            } else {
+                singletons.push(row);
             }
         }
 
@@ -412,15 +415,15 @@ impl ShardProcessor {
         Ok(())
     }
 
-    fn maybe_emit_fsid_fallback_warning(&mut self, row: &RowView) {
-        if self.fsid_fallback_warned {
+    fn maybe_emit_fsid_ungrouped_warning(&mut self, row: &RowView) {
+        if self.fsid_ungrouped_warned {
             return;
         }
-        self.fsid_fallback_warned = true;
+        self.fsid_ungrouped_warned = true;
         tracing::warn!(
             row_id = row.row_id,
-            "row has inode without fsid; falling back to inode-only hardlink \
-             grouping for this shard (see SCHEMA_CONTRACT.md \"Null attribute semantics\")",
+            "hardlinked row has inode without fsid; copying affected entries \
+             independently (see SCHEMA_CONTRACT.md \"Null attribute semantics\")",
         );
         self.mover
             .downgrade_sink()
@@ -599,12 +602,10 @@ async fn run_group(
 // mover or libnfs.
 // =============================================================================
 
-/// Build the hardlink-map key from a row. Returns `None` if the row
-/// has no inode (it's not a hardlink target candidate). When the row
-/// has an inode but no fsid, returns `Some((None, inode))` — the
-/// caller is responsible for recording the FsidUngrouped downgrade.
+/// Build the hardlink-map key from a row. Both filesystem and inode identity
+/// are required; without either one, grouping could link unrelated files.
 pub(crate) fn hardlink_key(row: &RowView) -> Option<HardlinkKey> {
-    row.inode.map(|inode| (row.fsid, inode))
+    row.fsid.zip(row.inode)
 }
 
 /// Sort dir rows so deeper paths come first. Required by Phase 2 of
@@ -688,16 +689,13 @@ mod tests {
     fn hardlink_key_includes_fsid_when_present() {
         assert_eq!(
             hardlink_key(&row(Some(42), Some(7), Some(2))),
-            Some((Some(7), 42)),
+            Some((7, 42)),
         );
     }
 
     #[test]
-    fn hardlink_key_falls_back_to_none_fsid() {
-        assert_eq!(
-            hardlink_key(&row(Some(42), None, Some(2))),
-            Some((None, 42)),
-        );
+    fn hardlink_key_is_none_without_fsid() {
+        assert_eq!(hardlink_key(&row(Some(42), None, Some(2))), None);
     }
 
     #[test]

@@ -259,7 +259,7 @@ pub(crate) async fn run_manifest_with_stop(
             failures: failures.clone(),
             throughput: throughput.clone(),
             dir_restamp: Vec::new(),
-            fsid_fallback_warned: false,
+            fsid_ungrouped_warned: false,
             emitter: EventEmitter::disabled(),
             run_control: None,
             stop: stop.token(),
