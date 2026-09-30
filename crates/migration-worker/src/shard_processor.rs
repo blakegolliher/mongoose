@@ -32,6 +32,16 @@
 //!
 //! Cross-shard hardlinks remain out of scope for v1.
 //!
+//! ## Special nodes (fifo, socket, device)
+//!
+//! The mover recognizes these and does not create them. Such a row is a
+//! **processed omission**: it advances the shard, is not retried, moves
+//! no bytes, and is counted in `files_special_not_copied`, never in
+//! `files_ok` or `files_failed`. The mover writes one
+//! `SPECIAL_NOT_COPIED` downgrade record per row. Special rows never
+//! join a hardlink group: nothing is created for later rows to link
+//! against, so each row is its own omission.
+//!
 //! ## Operator pause (coord `Pause`)
 //!
 //! Checked between batches only: a paused worker finishes the batch in
@@ -65,6 +75,7 @@ use migration_core::records::{DowngradeKind, FailurePhase};
 use migration_core::schema::FileTypeTag;
 use migration_core::shard::{RowView, ShardReader};
 use migration_mover::batch::{Batch, BatchBudget, InflightLimiter};
+use migration_mover::strategy::Strategy;
 use migration_mover::{FailureSink, FileMover, MoveOutcome};
 use std::collections::HashMap;
 use std::path::Path;
@@ -154,7 +165,7 @@ impl ShardProcessor {
                 // honored. Everything before it is committed.
                 if self.stop.is_cancelled() {
                     tracing::info!(
-                        rows_done = outcome.files_ok + outcome.files_failed,
+                        rows_done = outcome.rows_processed(),
                         rows_total = total,
                         "stop requested; leaving shard at batch boundary",
                     );
@@ -269,6 +280,14 @@ impl ShardProcessor {
             if row.file_type == FileTypeTag::Dir {
                 self.dir_restamp.push(row.clone());
                 dirs.push(row);
+                continue;
+            }
+            if row.file_type.is_special() {
+                // Never part of a hardlink group: the mover creates
+                // nothing for a special node, so a later row of the
+                // group would have no destination entry to link to and
+                // would fail. Each special row is its own omission.
+                singletons.push(row);
                 continue;
             }
             if row.nlink.unwrap_or(1) > 1 {
@@ -436,6 +455,9 @@ impl ShardProcessor {
             use std::sync::atomic::Ordering::Relaxed;
             self.live.rows_done.fetch_add(1, Relaxed);
             match (&mo.result, mo.strategy) {
+                (Ok(()), Strategy::SpecialNotCopied) => {
+                    self.live.files_special_not_copied.fetch_add(1, Relaxed);
+                }
                 (Ok(()), _) => {
                     self.live.files_ok.fetch_add(1, Relaxed);
                     self.live.bytes_moved.fetch_add(mo.bytes_moved, Relaxed);
@@ -459,10 +481,11 @@ impl ShardProcessor {
     }
 }
 
-/// Classify a single mover outcome into one of three sinks: success
-/// counter, fenced counter, or the per-file failures sink. Factored
-/// out of `ShardProcessor::record` so the Fenced special-case can be
-/// unit-tested without standing up a Mover + libnfs pool.
+/// Classify a single mover outcome into one of four sinks: the
+/// special-node omission counter, the success counter, the fenced
+/// counter, or the per-file failures sink. Factored out of
+/// `ShardProcessor::record` so the special cases can be unit-tested
+/// without standing up a Mover + libnfs pool.
 fn record_outcome(
     row_path: &[u8],
     mo: MoveOutcome,
@@ -472,6 +495,23 @@ fn record_outcome(
     emitter: &crate::events::EventEmitter,
 ) {
     match mo.result {
+        // A fifo, socket, or device node the mover recognized and did
+        // not create. Checked before the general success arm: the
+        // mover's result is `Ok` so the shard completes and the row is
+        // not retried, but nothing was copied. It is not a copied
+        // file, moves no bytes, feeds neither the throughput sample
+        // nor the failure ratio behind backpressure, and emits no
+        // coord progress event (the coord's delta has files, bytes,
+        // and errors, and this is none of them). The mover already
+        // wrote the row's `SPECIAL_NOT_COPIED` downgrade record.
+        Ok(()) if mo.strategy == Strategy::SpecialNotCopied => {
+            outcome.files_special_not_copied += 1;
+            tracing::debug!(
+                row_id = mo.row_id,
+                path = %String::from_utf8_lossy(row_path),
+                "special node not copied",
+            );
+        }
         Ok(()) => {
             outcome.files_ok += 1;
             // F05: a torn copy still commits (at-least-once; source
@@ -535,6 +575,12 @@ pub struct ProcessOutcome {
     /// `files_ok` — a torn copy is a success with a caveat, not a
     /// failure.
     pub files_torn: u64,
+    /// Fifos, sockets, and device nodes the mover recognized and did
+    /// not create. Processed rows that are neither copied files nor
+    /// failures: not in `files_ok`, `files_failed`, `files_fenced`,
+    /// or `bytes_moved`. Each has a `SPECIAL_NOT_COPIED` downgrade
+    /// record.
+    pub files_special_not_copied: u64,
     pub bytes_moved: u64,
     pub fenced: bool,
     /// The shard was left at a batch boundary because the process was
@@ -545,6 +591,13 @@ pub struct ProcessOutcome {
 }
 
 impl ProcessOutcome {
+    /// Rows that reached a final classification in this shard: copied,
+    /// failed, or a special node left out. Fenced rows are not
+    /// processed; the next reclaimer takes them.
+    pub fn rows_processed(&self) -> u64 {
+        self.files_ok + self.files_failed + self.files_special_not_copied
+    }
+
     pub fn with_fenced(mut self, v: bool) -> Self {
         self.fenced = v;
         self
@@ -804,6 +857,60 @@ mod tests {
         assert_eq!(sink.len(), 1, "non-Fenced Err must land in failures sink");
     }
 
+    /// A special node the mover left out is an omission. The mover's
+    /// result is `Ok`, but the row must not reach the general success
+    /// arm: it is not a copied file, not a failure, moves no bytes, and
+    /// adds nothing to the throughput sample.
+    #[test]
+    fn record_outcome_counts_a_special_node_as_an_omission_not_a_success() {
+        let sink = FailureSink::new();
+        let throughput = ThroughputCounter::new();
+        let mut outcome = ProcessOutcome::default();
+        let mo = MoveOutcome {
+            row_id: 9,
+            strategy: Strategy::SpecialNotCopied,
+            bytes_moved: 0,
+            torn: false,
+            result: Ok(()),
+        };
+
+        record_outcome(
+            b"/data/fifo-\xff",
+            mo,
+            &mut outcome,
+            &sink,
+            &throughput,
+            &crate::events::EventEmitter::disabled(),
+        );
+
+        assert_eq!(outcome.files_special_not_copied, 1);
+        assert_eq!(outcome.files_ok, 0, "an omission is not a copied file");
+        assert_eq!(outcome.files_failed, 0, "and not a failure");
+        assert_eq!(outcome.files_fenced, 0);
+        assert_eq!(outcome.files_torn, 0);
+        assert_eq!(outcome.bytes_moved, 0);
+        assert_eq!(outcome.rows_processed(), 1, "but it is a processed row");
+        assert!(sink.is_empty(), "nothing for a retry to pick up");
+        assert_eq!(throughput.sample_mb_s(60), 0.0);
+    }
+
+    /// Shard completion and interruption reporting count every final
+    /// classification once: copied, failed, and special-not-copied.
+    /// Fenced rows are not processed.
+    #[test]
+    fn rows_processed_sums_each_final_classification_once() {
+        let outcome = ProcessOutcome {
+            rows_total: 10,
+            files_ok: 5,
+            files_failed: 2,
+            files_special_not_copied: 3,
+            files_fenced: 4,
+            files_torn: 1, // inside files_ok
+            ..ProcessOutcome::default()
+        };
+        assert_eq!(outcome.rows_processed(), 10);
+    }
+
     #[test]
     fn record_outcome_success_path_unchanged_by_r8() {
         // Regression guard: the Ok branch must still bump files_ok
@@ -831,6 +938,7 @@ mod tests {
         assert_eq!(outcome.files_ok, 1);
         assert_eq!(outcome.files_failed, 0);
         assert_eq!(outcome.files_fenced, 0);
+        assert_eq!(outcome.files_special_not_copied, 0);
         assert_eq!(outcome.bytes_moved, 4096);
         assert!(sink.is_empty());
     }

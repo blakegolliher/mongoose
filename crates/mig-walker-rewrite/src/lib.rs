@@ -713,16 +713,26 @@ fn translate_batch(
         let translated_path = strip_source_root(raw_path, source_root)?;
         path_b.append_value(&translated_path);
 
-        let mime = walker_file_type.value(i);
-        let tag = file_type_tag_from_mime(mime);
+        // The walker's type is the only source of the type: its
+        // `permissions` column holds the permission bits alone. A value
+        // that is not one of the seven types fails the shard, with the
+        // row named. Guessing `Regular` would send a fifo, a device, or
+        // an entry of unknown type down the file-data path.
+        let walker_type = if walker_file_type.is_null(i) {
+            None
+        } else {
+            Some(walker_file_type.value(i))
+        };
+        let (tag, mode) = canonical_type_and_mode(walker_type, walker_permissions.value(i))
+            .with_context(|| {
+                format!(
+                    "shard {shard_idx} row {row_in_shard} (row_id {}), path {:?}",
+                    schema::make_row_id(shard_idx, row_in_shard),
+                    String::from_utf8_lossy(&translated_path),
+                )
+            })?;
         file_type_b.append_value(tag as u8);
-
-        let s_ifmt = match tag {
-            FileTypeTag::Dir => libc::S_IFDIR,
-            FileTypeTag::Symlink => libc::S_IFLNK,
-            _ => libc::S_IFREG,
-        } as u32;
-        mode_b.append_value((walker_permissions.value(i) as u32) | s_ifmt);
+        mode_b.append_value(mode);
 
         match (walker_mtime_sec, walker_mtime_nsec) {
             (Some(sec_arr), Some(nsec_arr)) if !sec_arr.is_null(i) && !nsec_arr.is_null(i) => {
@@ -942,16 +952,37 @@ pub fn strip_source_root(path: &[u8], source_root: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
-/// Map walker's MIME-style `file_type` string to a canonical
-/// `FileTypeTag`. Walker only ever distinguishes "directory" and
-/// "symlink" explicitly — every other entry is bucketed as Regular,
-/// which is the limitation called out in `README.md`.
-pub fn file_type_tag_from_mime(mime: &str) -> FileTypeTag {
-    match mime {
-        "directory" => FileTypeTag::Dir,
-        "symlink" => FileTypeTag::Symlink,
-        _ => FileTypeTag::Regular,
-    }
+/// Translate one walker row's entry type and permission bits into the
+/// canonical `file_type` tag and the `mode` that carries the same type.
+///
+/// `walker_type` is the walker's `file_type` string (`None` for a null
+/// value); the table lives in [`FileTypeTag::from_walker_file_type`].
+/// The returned mode is `(permissions & 0o7777) | type bits`, checked
+/// against the tag before it is returned.
+///
+/// Fails for every value outside the seven types: `unknown`, the empty
+/// string, another case, a MIME-style value, null. There is no
+/// fallback type.
+pub fn canonical_type_and_mode(
+    walker_type: Option<&str>,
+    permissions: u16,
+) -> Result<(FileTypeTag, u32)> {
+    let Some(walker_type) = walker_type else {
+        bail!("walker file_type is null; it is required for every row");
+    };
+    let Some(tag) = FileTypeTag::from_walker_file_type(walker_type) else {
+        bail!(
+            "walker file_type {walker_type:?} is not one of the seven entry types \
+             (file, directory, symlink, fifo, socket, block_device, char_device); \
+             refusing to guess a type for this row"
+        );
+    };
+    let Some(type_bits) = tag.mode_type_bits() else {
+        bail!("walker file_type {walker_type:?} has no canonical mode type bits");
+    };
+    let mode = (u32::from(permissions) & 0o7777) | type_bits;
+    tag.check_mode(mode).map_err(|reason| anyhow!(reason))?;
+    Ok((tag, mode))
 }
 
 // =============================================================================
@@ -1215,19 +1246,86 @@ mod tests {
         assert!(msg.contains("no parquet files found"), "{msg}");
     }
 
+    /// The handoff's table, exactly: walker string, canonical tag,
+    /// canonical value, and the type bits `mode` must carry.
+    const TYPE_TABLE: [(&str, FileTypeTag, u8, u32); 7] = [
+        ("file", FileTypeTag::Regular, 1, libc::S_IFREG),
+        ("directory", FileTypeTag::Dir, 2, libc::S_IFDIR),
+        ("symlink", FileTypeTag::Symlink, 3, libc::S_IFLNK),
+        ("fifo", FileTypeTag::Fifo, 4, libc::S_IFIFO),
+        ("socket", FileTypeTag::Socket, 5, libc::S_IFSOCK),
+        ("block_device", FileTypeTag::BlockDev, 6, libc::S_IFBLK),
+        ("char_device", FileTypeTag::CharDev, 7, libc::S_IFCHR),
+    ];
+
     #[test]
-    fn file_type_tag_translation_table() {
-        assert_eq!(file_type_tag_from_mime("directory"), FileTypeTag::Dir);
-        assert_eq!(file_type_tag_from_mime("symlink"), FileTypeTag::Symlink);
-        // Walker actually emits "file" for regular files; spec table
-        // says "anything else" -> Regular.
-        assert_eq!(file_type_tag_from_mime("file"), FileTypeTag::Regular);
-        assert_eq!(
-            file_type_tag_from_mime("application/pdf"),
-            FileTypeTag::Regular,
-        );
-        assert_eq!(file_type_tag_from_mime("text/plain"), FileTypeTag::Regular);
-        assert_eq!(file_type_tag_from_mime(""), FileTypeTag::Regular);
+    fn all_seven_walker_types_translate_to_their_tag_and_mode_bits() {
+        for (walker, tag, value, type_bits) in TYPE_TABLE {
+            let (got_tag, mode) = canonical_type_and_mode(Some(walker), 0o640).unwrap();
+            assert_eq!(got_tag, tag, "{walker}");
+            assert_eq!(got_tag as u8, value, "{walker}");
+            assert_eq!(mode & libc::S_IFMT, type_bits, "{walker}");
+            assert_eq!(mode & 0o7777, 0o640, "{walker}: permission bits");
+        }
+    }
+
+    /// The contract's own constants are the platform's.
+    #[test]
+    fn canonical_mode_type_bits_match_libc() {
+        assert_eq!(schema::S_IFMT, libc::S_IFMT);
+        assert_eq!(schema::S_IFREG, libc::S_IFREG);
+        assert_eq!(schema::S_IFDIR, libc::S_IFDIR);
+        assert_eq!(schema::S_IFLNK, libc::S_IFLNK);
+        assert_eq!(schema::S_IFIFO, libc::S_IFIFO);
+        assert_eq!(schema::S_IFSOCK, libc::S_IFSOCK);
+        assert_eq!(schema::S_IFBLK, libc::S_IFBLK);
+        assert_eq!(schema::S_IFCHR, libc::S_IFCHR);
+    }
+
+    #[test]
+    fn permission_bits_survive_including_setuid_setgid_and_sticky() {
+        for permissions in [0u16, 0o644, 0o755, 0o4755, 0o2775, 0o1777, 0o7777] {
+            for (walker, _, _, type_bits) in TYPE_TABLE {
+                let (_, mode) = canonical_type_and_mode(Some(walker), permissions).unwrap();
+                assert_eq!(
+                    mode & 0o7777,
+                    u32::from(permissions),
+                    "{walker} {permissions:#o}"
+                );
+                assert_eq!(mode & !0o7777, type_bits, "{walker} {permissions:#o}");
+            }
+        }
+        // Bits above the permission bits in the walker column never
+        // leak into the type.
+        let (_, mode) = canonical_type_and_mode(Some("file"), 0o170644).unwrap();
+        assert_eq!(mode, libc::S_IFREG | 0o644);
+    }
+
+    #[test]
+    fn values_outside_the_seven_types_are_rejected_not_made_regular() {
+        for bad in [
+            "unknown",
+            "",
+            "File",
+            "DIRECTORY",
+            "Symlink",
+            "text/plain",
+            "application/pdf",
+            "inode/directory",
+            "regular",
+            "pipe",
+            "anything else",
+        ] {
+            let err = canonical_type_and_mode(Some(bad), 0o644)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(&format!("{bad:?}")), "{bad:?}: {err}");
+            assert!(err.contains("refusing to guess"), "{bad:?}: {err}");
+        }
+        let err = canonical_type_and_mode(None, 0o644)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("null"), "{err}");
     }
 
     #[test]
@@ -1803,5 +1901,254 @@ mod tests {
             format!("{err:#}").contains("does not start with --source-root"),
             "unexpected error: {err:#}"
         );
+    }
+
+    // ---------------- entry types: all seven, and nothing else ----------------
+
+    /// A walker-shape batch with one row per `(absolute raw path,
+    /// walker file_type, permissions)`. `None` writes a null type.
+    /// Carries `path_bytes` and `fsid`, as a current walker does.
+    fn walker_batch_of(rows: &[(&[u8], Option<&str>, u16)]) -> RecordBatch {
+        let n = rows.len();
+        let lossy: Vec<String> = rows
+            .iter()
+            .map(|(path, ..)| String::from_utf8_lossy(path).into_owned())
+            .collect();
+        let path = StringArray::from(lossy.iter().map(String::as_str).collect::<Vec<_>>());
+        let path_bytes = BinaryArray::from_vec(rows.iter().map(|(path, ..)| *path).collect());
+        let file_type = StringArray::from(rows.iter().map(|(_, ty, _)| *ty).collect::<Vec<_>>());
+        let perms = arrow::array::UInt16Array::from(
+            rows.iter().map(|(_, _, perm)| *perm).collect::<Vec<_>>(),
+        );
+        let mtime = arrow::array::Int64Array::from(vec![1_700_000_000_000_000i64; n]);
+        let inode = UInt64Array::from((0..n as u64).map(|i| 500 + i).collect::<Vec<_>>());
+        let nlink = UInt32Array::from(vec![1u32; n]);
+        let uid = UInt32Array::from(vec![1000u32; n]);
+        let gid = UInt32Array::from(vec![2000u32; n]);
+        let size = UInt64Array::from(vec![0u64; n]);
+        let fsid = UInt64Array::from(vec![Some(41u64); n]);
+
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("path", DataType::Utf8, false),
+            Field::new("path_bytes", DataType::Binary, false),
+            Field::new("file_type", DataType::Utf8, true),
+            Field::new("permissions", DataType::UInt16, false),
+            Field::new("mtime_us", DataType::Int64, true),
+            Field::new("inode", DataType::UInt64, false),
+            Field::new("nlink", DataType::UInt32, false),
+            Field::new("uid", DataType::UInt32, false),
+            Field::new("gid", DataType::UInt32, false),
+            Field::new("size", DataType::UInt64, false),
+            Field::new("fsid", DataType::UInt64, true),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(path) as ArrayRef,
+                Arc::new(path_bytes),
+                Arc::new(file_type),
+                Arc::new(perms),
+                Arc::new(mtime),
+                Arc::new(inode),
+                Arc::new(nlink),
+                Arc::new(uid),
+                Arc::new(gid),
+                Arc::new(size),
+                Arc::new(fsid),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn write_walker_shard(dir: &Path, name: &str, batch: &RecordBatch) {
+        std::fs::create_dir_all(dir).unwrap();
+        let file = File::create(dir.join(name)).unwrap();
+        let mut writer = ArrowWriter::try_new(file, batch.schema(), None).unwrap();
+        writer.write(batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    fn cli(input: &Path, output: &Path, resume: bool) -> Cli {
+        Cli {
+            input: input.to_path_buf(),
+            output: output.to_path_buf(),
+            source_root: "/src".to_string(),
+            walker_version: "test-walker".to_string(),
+            resume,
+            report: None,
+            verbose: false,
+        }
+    }
+
+    fn read_rows(shard: &Path) -> Vec<migration_core::shard::RowView> {
+        migration_core::shard::ShardReader::open(shard)
+            .unwrap()
+            .into_rows()
+            .unwrap()
+            .collect::<migration_core::Result<_>>()
+            .unwrap()
+    }
+
+    fn parquet_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".parquet"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Every type the walker emits reaches the canonical shard with its
+    /// own tag and matching mode bits, through the real rewrite and the
+    /// real shard reader. One special path is not UTF-8.
+    #[test]
+    fn all_seven_types_survive_the_rewrite_with_raw_paths_and_fsid() {
+        let work = tempdir("seven-types");
+        let (in_dir, out_dir) = (work.join("in"), work.join("out"));
+        let rows: [(&[u8], Option<&str>, u16); 7] = [
+            (b"/src/f", Some("file"), 0o644),
+            (b"/src/d", Some("directory"), 0o755),
+            (b"/src/l", Some("symlink"), 0o777),
+            (b"/src/fifo-\xff", Some("fifo"), 0o600),
+            (b"/src/sock", Some("socket"), 0o660),
+            (b"/src/blk", Some("block_device"), 0o640),
+            (b"/src/chr", Some("char_device"), 0o620),
+        ];
+        write_walker_shard(&in_dir, "part-r00-00000.parquet", &walker_batch_of(&rows));
+
+        run_rewrite(&cli(&in_dir, &out_dir, false)).expect("rewrite");
+
+        let got = read_rows(&out_dir.join("part-r00-00000.parquet"));
+        assert_eq!(got.len(), 7);
+        for (row, ((path, walker, perms), (_, tag, _, type_bits))) in
+            got.iter().zip(rows.iter().zip(TYPE_TABLE))
+        {
+            assert_eq!(
+                Some(TYPE_TABLE.iter().find(|t| t.1 == tag).unwrap().0),
+                *walker
+            );
+            assert_eq!(row.file_type, tag, "{walker:?}");
+            assert_eq!(row.mode, type_bits | u32::from(*perms), "{walker:?}");
+            assert_eq!(row.path, path["/src".len()..], "{walker:?}: raw path bytes");
+            assert_eq!(row.fsid, Some(41), "{walker:?}");
+        }
+        assert_eq!(
+            got[3].path, b"/fifo-\xff",
+            "the non-UTF-8 special path is byte-exact"
+        );
+    }
+
+    /// A type outside the table fails the shard with the row named, and
+    /// nothing is activated or checkpointed. Once the input is fixed,
+    /// `--resume` rewrites the shard.
+    #[test]
+    fn unknown_type_fails_the_shard_without_activating_it_and_resume_recovers() {
+        let work = tempdir("unknown-type");
+        let (in_dir, out_dir) = (work.join("in"), work.join("out"));
+        let shard = "part-r00-00000.parquet";
+        write_walker_shard(
+            &in_dir,
+            shard,
+            &walker_batch_of(&[
+                (b"/src/ok", Some("file"), 0o644),
+                (b"/src/bad-\xff", Some("unknown"), 0o644),
+            ]),
+        );
+
+        let err = run_rewrite(&cli(&in_dir, &out_dir, false)).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("rewriting shard"), "{msg}");
+        assert!(msg.contains(shard), "{msg}");
+        assert!(msg.contains("shard 0 row 1"), "{msg}");
+        assert!(msg.contains(r#""unknown""#), "{msg}");
+        assert!(msg.contains("refusing to guess"), "{msg}");
+
+        assert!(
+            parquet_names(&out_dir).is_empty(),
+            "no shard and no partial left behind: {:?}",
+            parquet_names(&out_dir)
+        );
+        let report_path = out_dir.join("rewrite-report.json");
+        if report_path.exists() {
+            let report: RewriteReport =
+                serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+            assert!(!report.complete, "a failed rewrite is not complete");
+            assert!(
+                report.shards.is_empty(),
+                "the failed shard is not checkpointed"
+            );
+        }
+
+        // The operator re-scans; the entry is a fifo after all.
+        write_walker_shard(
+            &in_dir,
+            shard,
+            &walker_batch_of(&[
+                (b"/src/ok", Some("file"), 0o644),
+                (b"/src/bad-\xff", Some("fifo"), 0o644),
+            ]),
+        );
+        run_rewrite(&cli(&in_dir, &out_dir, true)).expect("resume after the input is corrected");
+        let got = read_rows(&out_dir.join(shard));
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[1].file_type, FileTypeTag::Fifo);
+        assert_eq!(got[1].path, b"/bad-\xff");
+        let report: RewriteReport =
+            serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+        assert!(report.complete);
+        assert_eq!(report.total_rows, 2);
+    }
+
+    /// With several shards, the ones before the bad one stay rewritten
+    /// and checkpointed; the bad one is neither.
+    #[test]
+    fn a_bad_shard_does_not_complete_the_report_or_disturb_earlier_shards() {
+        let work = tempdir("bad-second-shard");
+        let (in_dir, out_dir) = (work.join("in"), work.join("out"));
+        write_walker_shard(
+            &in_dir,
+            "part-r00-00000.parquet",
+            &walker_batch_of(&[(b"/src/a", Some("file"), 0o644)]),
+        );
+        write_walker_shard(
+            &in_dir,
+            "part-r00-00001.parquet",
+            &walker_batch_of(&[(b"/src/b", Some("text/plain"), 0o644)]),
+        );
+
+        let err = run_rewrite(&cli(&in_dir, &out_dir, false)).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("part-r00-00001.parquet"), "{msg}");
+        assert!(msg.contains("shard 1 row 0"), "{msg}");
+        assert!(msg.contains(r#""text/plain""#), "{msg}");
+
+        assert_eq!(parquet_names(&out_dir), ["part-r00-00000.parquet"]);
+        let report: RewriteReport =
+            serde_json::from_slice(&std::fs::read(out_dir.join("rewrite-report.json")).unwrap())
+                .unwrap();
+        assert!(!report.complete);
+        assert_eq!(report.shards.len(), 1);
+        assert_eq!(report.shards[0].input_name, "part-r00-00000.parquet");
+    }
+
+    /// Null, empty, another case, and MIME-style values all fail in
+    /// `translate_batch` with the row identified.
+    #[test]
+    fn translate_batch_rejects_null_empty_case_changed_and_mime_types() {
+        for (bad, shown) in [
+            (None, "null"),
+            (Some(""), r#""""#),
+            (Some("Directory"), r#""Directory""#),
+            (Some("application/pdf"), r#""application/pdf""#),
+        ] {
+            let batch =
+                walker_batch_of(&[(b"/src/ok", Some("file"), 0o644), (b"/src/odd", bad, 0o644)]);
+            let err = translate_batch(&batch, 3, 10, b"/src").unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains("shard 3 row 11"), "{bad:?}: {msg}");
+            assert!(msg.contains(shown), "{bad:?}: {msg}");
+            assert!(msg.contains(r#""/odd""#), "{bad:?}: {msg}");
+        }
     }
 }

@@ -597,7 +597,7 @@ mod tests {
             path: path.to_vec(),
             file_type: t,
             size: 0,
-            mode: 0o40755,
+            mode: t.mode_type_bits().unwrap() | 0o755,
             uid: None,
             gid: None,
             mtime: None,

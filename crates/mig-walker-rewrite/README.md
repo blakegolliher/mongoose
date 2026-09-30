@@ -51,27 +51,39 @@ output directory themselves. This tool deliberately does not handle
 S3, manifest generation, or filtering — it is purely a schema
 translator.
 
+## Entry types
+
+The walker's `permissions` column (`UInt16`) holds permission bits
+only. The canonical `mode` (`UInt32`) also carries the type in its
+`S_IFMT` bits, so the shim derives both the canonical `file_type` tag
+and those bits from the walker's `file_type` string. All seven entry
+types are represented:
+
+| Walker `file_type` | Canonical tag | Value | `mode` type bits |
+|---|---|---:|---|
+| `file` | `Regular` | 1 | `S_IFREG` |
+| `directory` | `Dir` | 2 | `S_IFDIR` |
+| `symlink` | `Symlink` | 3 | `S_IFLNK` |
+| `fifo` | `Fifo` | 4 | `S_IFIFO` |
+| `socket` | `Socket` | 5 | `S_IFSOCK` |
+| `block_device` | `BlockDev` | 6 | `S_IFBLK` |
+| `char_device` | `CharDev` | 7 | `S_IFCHR` |
+
+`mode = (permissions & 0o7777) | type bits`. The table has one
+definition, `FileTypeTag::from_walker_file_type` in `migration-core`.
+
+**Any other value fails the rewrite**: `unknown`, the empty string, a
+null, a different case, a MIME-style value such as `text/plain`. There
+is no fallback type. The error names the shard, the row, the path, and
+the value; the shard is not activated and not checkpointed, and
+`--resume` rewrites it once the input is corrected.
+
+Fifos, sockets, and device nodes are **represented, not created**. The
+mover recognizes them, records each as `SPECIAL_NOT_COPIED`, and leaves
+them out; cutover verification reports any that are missing from the
+destination.
+
 ## Limitations (do not fix; wait for native walker support)
-
-The translation `permissions` (`UInt16`, no type bits) →
-`mode` (`UInt32`, with `S_IFMT` type bits) requires synthesizing the
-type bits from walker's MIME-string `file_type` column. The mapping is:
-
-| Walker `file_type` | Synthesized `S_IFMT` |
-|---|---|
-| `"directory"` | `S_IFDIR` |
-| `"symlink"` | `S_IFLNK` |
-| anything else | `S_IFREG` |
-
-This means **the shim cannot produce `Fifo`, `Socket`, `BlockDev`, or
-`CharDev` `FileTypeTag` values**. Trees containing those file types
-will be misclassified as `Regular`. The mover will then attempt to
-read them as data files and fail with libnfs errors at copy time —
-visible per-file failures, not silent corruption.
-
-For M2/M3 manual verification with the curated test tree (regular
-files, directories, symlinks only), this is fine. For migrating
-production data, **operators must wait for native walker support**.
 
 The shim carries the walker's nullable `fsid` into canonical output. Older
 walker shards without that column remain readable with `fsid = null`; the

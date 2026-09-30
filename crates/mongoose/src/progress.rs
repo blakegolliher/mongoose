@@ -24,6 +24,13 @@ pub struct CopyProgress {
     /// Committed copies whose source changed mid-copy (also counted in
     /// `files_ok`; each has a TornCopy downgrade record).
     pub files_torn: u64,
+    /// Fifos, sockets, and device nodes that were recognized and NOT
+    /// copied. Processed rows: they are in no other counter, and each
+    /// has a `SPECIAL_NOT_COPIED` record under `downgrades/`.
+    /// Defaults to zero for a progress file written before the
+    /// counter existed.
+    #[serde(default)]
+    pub files_special_not_copied: u64,
     pub bytes_moved: u64,
     pub throughput_mb_s_1m: f64,
     /// True once every shard completed and the root mtime restore ran.
@@ -41,10 +48,30 @@ impl CopyProgress {
             files_ok: 0,
             files_failed: 0,
             files_torn: 0,
+            files_special_not_copied: 0,
             bytes_moved: 0,
             throughput_mb_s_1m: 0.0,
             done: false,
         }
+    }
+
+    /// Fold one fully processed shard into the checkpoint: its counters,
+    /// and its path in `completed_shards` so a re-run skips it. A shard
+    /// whose only outcome for some rows is "special node not copied" is
+    /// complete; those rows are not retried.
+    pub fn record_shard(
+        &mut self,
+        shard_path: &str,
+        outcome: &migration_worker::shard_processor::ProcessOutcome,
+        throughput_mb_s_1m: f64,
+    ) {
+        self.files_ok += outcome.files_ok;
+        self.files_failed += outcome.files_failed;
+        self.files_torn += outcome.files_torn;
+        self.files_special_not_copied += outcome.files_special_not_copied;
+        self.bytes_moved += outcome.bytes_moved;
+        self.throughput_mb_s_1m = throughput_mb_s_1m;
+        self.completed_shards.push(shard_path.to_string());
     }
 
     /// Resume an existing progress file when it belongs to this run;
@@ -132,6 +159,68 @@ pub fn persist_shard_results_then<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `progress.json` written before special nodes were counted has
+    /// no such field; it must still load, with the counter at zero.
+    #[test]
+    fn progress_written_before_the_special_counter_reads_as_zero() {
+        let old = r#"{
+            "run_id": "run-old",
+            "started_utc": "2026-09-01T00:00:00Z",
+            "updated_utc": "2026-09-01T00:10:00Z",
+            "shards_total": 2,
+            "completed_shards": ["canonical/part-0000.parquet"],
+            "files_ok": 7,
+            "files_failed": 1,
+            "files_torn": 0,
+            "bytes_moved": 4096,
+            "throughput_mb_s_1m": 1.5,
+            "done": false
+        }"#;
+        let p: CopyProgress = serde_json::from_str(old).unwrap();
+        assert_eq!(p.files_special_not_copied, 0);
+        assert_eq!(p.files_ok, 7);
+        assert!(p.is_completed("canonical/part-0000.parquet"));
+    }
+
+    /// A shard with special nodes commits like any other, and its
+    /// omissions land in their own counter, not in `files_ok`.
+    #[test]
+    fn record_shard_commits_the_shard_and_keeps_omissions_separate() {
+        use migration_worker::shard_processor::ProcessOutcome;
+        let dir = tempfile::tempdir().unwrap();
+        let wd = WorkDir::new(dir.path());
+        let mut p = CopyProgress::fresh("run-s", 2);
+        let outcome = ProcessOutcome {
+            rows_total: 6,
+            files_ok: 3,
+            files_failed: 1,
+            files_special_not_copied: 2,
+            files_torn: 1,
+            bytes_moved: 900,
+            ..ProcessOutcome::default()
+        };
+
+        p.record_shard("canonical/part-0000.parquet", &outcome, 2.5);
+        p.record_shard("canonical/part-0001.parquet", &outcome, 3.5);
+        p.write(&wd).unwrap();
+
+        let back = CopyProgress::load_or_fresh(&wd, "run-s", 2).unwrap();
+        assert_eq!(back.files_ok, 6);
+        assert_eq!(back.files_failed, 2);
+        assert_eq!(back.files_special_not_copied, 4);
+        assert_eq!(back.files_torn, 2);
+        assert_eq!(back.bytes_moved, 1800);
+        assert_eq!(back.throughput_mb_s_1m, 3.5);
+        assert!(back.is_completed("canonical/part-0000.parquet"));
+        assert!(back.is_completed("canonical/part-0001.parquet"));
+        let json = std::fs::read_to_string(wd.progress_json()).unwrap();
+        assert!(
+            json.contains(r#""files_special_not_copied": 4"#)
+                || json.contains(r#""files_special_not_copied":4"#),
+            "{json}"
+        );
+    }
 
     #[test]
     fn progress_resumes_only_its_own_run() {

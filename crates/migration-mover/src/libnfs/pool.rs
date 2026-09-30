@@ -58,8 +58,8 @@ impl ContextPair {
 #[cfg(test)]
 impl ContextPair {
     /// Test-only pair with no mounted contexts. For unit tests of
-    /// strategy arms that never touch the src/dst contexts (e.g.
-    /// `Strategy::Skip`) and of `run_with_pair`'s outcome assembly
+    /// strategy arms that never touch the src/dst contexts and of
+    /// `run_with_pair`'s outcome assembly
     /// (F41). Calling `src()`/`dst()`/`split()` on it panics; `Drop`
     /// is a no-op (both slots are `None`).
     pub(crate) fn unmounted_for_tests() -> Self {

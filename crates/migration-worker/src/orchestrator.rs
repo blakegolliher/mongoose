@@ -825,11 +825,14 @@ pub async fn run_with_stop(
         {
             let mut p = progress.write().await;
             p.shard_rows_total = outcome.rows_total;
-            p.shard_rows_done = outcome.files_ok + outcome.files_failed;
+            p.shard_rows_done = outcome.rows_processed();
             p.shard_bytes_done = p.shard_bytes_done.saturating_add(outcome.bytes_moved);
             p.files_ok = p.files_ok.saturating_add(outcome.files_ok);
             p.files_failed = p.files_failed.saturating_add(outcome.files_failed);
             p.files_fenced = p.files_fenced.saturating_add(outcome.files_fenced);
+            p.files_special_not_copied = p
+                .files_special_not_copied
+                .saturating_add(outcome.files_special_not_copied);
         }
 
         // Flush downgrade + failure JSONL produced this shard. Shard
@@ -869,10 +872,25 @@ pub async fn run_with_stop(
             }
         }
 
+        if outcome.files_special_not_copied > 0 {
+            tracing::warn!(
+                shard = %shard_filename,
+                special_not_copied = outcome.files_special_not_copied,
+                records = %layout::downgrades_flush_key(&host_id, &shard_filename, record.epoch),
+                "fifos, sockets, or device nodes in this shard were NOT copied; each has a \
+                 SPECIAL_NOT_COPIED downgrade record, and cutover stays blocked until they are \
+                 recreated on the destination or removed from the source",
+            );
+        }
+
         // Update the backpressure gate with this shard's stats and
         // the latest throughput sample. The throughput sample here
         // races slightly with the heartbeat, but both pull from the
         // same atomic counter so values are at most one sample apart.
+        //
+        // Special-node omissions are deliberately left out: they are
+        // neither an NFS failure nor something a retry or a slower
+        // pace can heal, so they must not move the failure ratio.
         let throughput_now = throughput.sample_mb_s(60);
         backpressure.update(outcome.files_ok, outcome.files_failed, throughput_now);
 
@@ -907,7 +925,7 @@ pub async fn run_with_stop(
             };
             tracing::info!(
                 shard = %shard_filename,
-                rows_done = outcome.files_ok + outcome.files_failed,
+                rows_done = outcome.rows_processed(),
                 rows_total = outcome.rows_total,
                 "stop requested; releasing the shard in hand for a peer",
             );
@@ -2258,6 +2276,7 @@ mod tests {
             files_ok: 0,
             files_failed: 0,
             files_fenced: 0,
+            files_special_not_copied: 0,
             throughput_mb_s_1m: 0.0,
             status: "active".into(),
             held_etag: held_etag.map(str::to_string),

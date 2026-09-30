@@ -44,7 +44,7 @@ use crate::libnfs::{nfs_stat_64, ops, ContextPair, LibnfsContextPool, NfsContext
 use crate::paths::{join_root, partial_path};
 use crate::strategy::{self, Strategy, StrategyContext};
 use migration_core::fence::Fence;
-use migration_core::records::{DowngradeKind, FailurePhase, MigrationOptions};
+use migration_core::records::{DowngradeKind, FailurePhase, MigrationOptions, SpecialNode};
 use migration_core::shard::RowView;
 use std::sync::Arc;
 
@@ -782,11 +782,47 @@ impl Mover {
             already_copied_inode: false,
         };
         let strategy = strategy::pick(row, &strat_ctx);
+        // Neither of these touches the source or the destination, so
+        // neither takes a context pair from the pool.
+        match strategy {
+            Strategy::SpecialNotCopied => return self.special_not_copied(row),
+            Strategy::UnknownType => return unknown_type_outcome(row),
+            _ => {}
+        }
         let row_owned = row.clone();
         self.run_with_pair(row, strategy, move |me, pair| {
             me.execute(pair, &row_owned, strategy)
         })
         .await
+    }
+
+    /// A fifo, socket, or device node: recognized, and deliberately not
+    /// created. No RPC, no bytes. The downgrade record written here is
+    /// the durable statement that the entry exists on the source and is
+    /// absent from the destination; the shard processor counts the row
+    /// as `files_special_not_copied`, not as a copied file.
+    ///
+    /// The result is `Ok` so the shard can complete and the row is not
+    /// retried: recreating the node is the operator's call, and cutover
+    /// verification blocks until it is made.
+    fn special_not_copied(&self, row: &RowView) -> MoveOutcome {
+        let Some(node) = SpecialNode::from_tag(row.file_type) else {
+            // `pick` only selects this strategy for the four special
+            // tags; anything else here is a bug, and is not skipped.
+            return unknown_type_outcome(row);
+        };
+        self.downgrades.record(
+            row.row_id,
+            &row.path,
+            DowngradeKind::SpecialNotCopied { node },
+        );
+        MoveOutcome {
+            row_id: row.row_id,
+            strategy: Strategy::SpecialNotCopied,
+            bytes_moved: 0,
+            torn: false,
+            result: Ok(()),
+        }
     }
 
     /// Hardlink an already-copied dest path to a new linkpath. Caller
@@ -861,8 +897,8 @@ impl Mover {
 
     /// Dispatch one strategy body and report the bytes it actually
     /// wrote (F41). Only the streaming copy moves file data; symlink,
-    /// hardlink, dir-attrs, empty, and skip rows write no file bytes
-    /// and report 0 — `row.size` is never reported on faith.
+    /// hardlink, dir-attrs, and empty rows write no file bytes and
+    /// report 0 — `row.size` is never reported on faith.
     fn execute(
         &self,
         pair: &mut ContextPair,
@@ -879,7 +915,13 @@ impl Mover {
             Strategy::DirAttrs => self
                 .do_dir_attrs(pair, row)
                 .map(|()| SyncMoveResult::clean(0)),
-            Strategy::Skip => Ok(SyncMoveResult::clean(0)),
+            // `move_one` settles both before a pair is acquired. Reaching
+            // them here would mean a row was dispatched around it; fail
+            // rather than report a copy that did not happen.
+            Strategy::SpecialNotCopied | Strategy::UnknownType => Err(MoveError::new(
+                FailurePhase::Open,
+                "row has no copy strategy (special node or unknown type)",
+            )),
         }
     }
 
@@ -1606,6 +1648,25 @@ impl AttrExec for SyncAttrExec<'_> {
 
 /// Convert a raw-op error into a `MoveError`, logging the transport
 /// detail at debug (the tag alone feeds failure records).
+/// The outcome for a row with no canonical type: a per-file failure.
+/// The shard reader rejects such rows, so this guards a caller that
+/// built one by hand. It is never an omission and never a success.
+fn unknown_type_outcome(row: &RowView) -> MoveOutcome {
+    MoveOutcome {
+        row_id: row.row_id,
+        strategy: Strategy::UnknownType,
+        bytes_moved: 0,
+        torn: false,
+        result: Err(MoveError::new(
+            FailurePhase::Open,
+            format!(
+                "file_type={} is not a canonical type; refusing to copy or skip the row",
+                row.file_type as u8
+            ),
+        )),
+    }
+}
+
 fn raw_move_err(e: raw::RawError, phase: FailurePhase) -> MoveError {
     tracing::debug!(detail = %e.detail, "raw nfs op failed");
     MoveError::new(phase, e.tag)
@@ -2227,8 +2288,9 @@ mod tests {
     //
     // `MoveOutcome::bytes_moved` must report the bytes actually
     // written, never `row.size` taken on faith. Two sync-path `Ok`
-    // outcomes used to inflate it: `Strategy::Skip` (copies nothing)
-    // and an EarlyEof short copy (commits `written < row.size`).
+    // outcomes used to inflate it: a special-node row (copies nothing;
+    // then `Strategy::Skip`, now `Strategy::SpecialNotCopied`) and an
+    // EarlyEof short copy (commits `written < row.size`).
     // See docs/work-items/WORKER_RESILIENCE.md item 2.
 
     use migration_core::schema::FileTypeTag;
@@ -2345,29 +2407,132 @@ mod tests {
         assert!(outcome.torn);
     }
 
-    /// F41 acceptance test 5 (red before fix): a Skip row (fifo /
-    /// socket / dev) copies nothing and must report 0 bytes while
-    /// still counting as a success. Before the fix it reported
-    /// `row.size` — inflating throughput, backpressure inputs, and
-    /// coord aggregation.
+    /// Pool for rows that must not touch NFS at all.
+    struct NoPairPool;
+    #[async_trait]
+    impl LibnfsContextPool for NoPairPool {
+        async fn acquire(&self) -> anyhow::Result<ContextPair> {
+            panic!("a context pair was acquired for a row that performs no RPC");
+        }
+    }
+
+    fn special_row(file_type: FileTypeTag, path: &[u8]) -> RowView {
+        RowView {
+            path: path.to_vec(),
+            mode: file_type.mode_type_bits().unwrap() | 0o640,
+            ..test_row(4096, file_type)
+        }
+    }
+
+    /// A fifo, socket, or device row is an omission: no context pair
+    /// (so no source or destination RPC), zero bytes (F41: never
+    /// `row.size`), and exactly one `SPECIAL_NOT_COPIED` record whose
+    /// `path_b64` decodes to the row's raw path bytes.
     #[tokio::test]
-    async fn skip_reports_zero_bytes() {
+    async fn special_rows_move_nothing_and_record_the_omission() {
+        use base64::Engine;
+        use migration_core::records::{DowngradeRecord, SpecialNode};
+
+        for (file_type, node) in [
+            (FileTypeTag::Fifo, SpecialNode::Fifo),
+            (FileTypeTag::Socket, SpecialNode::Socket),
+            (FileTypeTag::BlockDev, SpecialNode::BlockDev),
+            (FileTypeTag::CharDev, SpecialNode::CharDev),
+        ] {
+            let mover = build_mover(
+                Arc::new(NoPairPool) as Arc<dyn LibnfsContextPool>,
+                Fence::new(),
+            );
+            mover
+                .downgrade_sink()
+                .set_current_shard("part-0007.parquet");
+            let row = special_row(file_type, b"/data/node-\xff");
+
+            let outcome = mover.move_one(&row).await;
+
+            assert_eq!(
+                outcome.strategy,
+                Strategy::SpecialNotCopied,
+                "{file_type:?}"
+            );
+            assert!(
+                outcome.result.is_ok(),
+                "{file_type:?}: {:?}",
+                outcome.result
+            );
+            assert_eq!(outcome.bytes_moved, 0, "{file_type:?}: not row.size");
+            assert!(!outcome.torn, "{file_type:?}");
+
+            let body = mover.downgrade_sink().drain_jsonl();
+            let lines: Vec<&[u8]> = body
+                .split(|&b| b == b'\n')
+                .filter(|l| !l.is_empty())
+                .collect();
+            assert_eq!(lines.len(), 1, "{file_type:?}: exactly one record");
+            let record: DowngradeRecord = serde_json::from_slice(lines[0]).unwrap();
+            assert_eq!(record.row_id, row.row_id, "{file_type:?}");
+            assert_eq!(record.shard, "part-0007.parquet", "{file_type:?}");
+            assert_eq!(
+                record.downgrade,
+                DowngradeKind::SpecialNotCopied { node },
+                "{file_type:?}"
+            );
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(&record.path_b64)
+                    .unwrap(),
+                b"/data/node-\xff",
+                "{file_type:?}: path bytes round-trip"
+            );
+            assert!(
+                String::from_utf8_lossy(lines[0]).contains(r#""SPECIAL_NOT_COPIED""#),
+                "{file_type:?}"
+            );
+        }
+    }
+
+    /// A row with no canonical type fails. It is neither copied nor
+    /// treated as a special node, and leaves no omission record.
+    #[tokio::test]
+    async fn unknown_type_row_is_a_failure_not_an_omission() {
         let mover = build_mover(
-            Arc::new(DummyPairPool) as Arc<dyn LibnfsContextPool>,
+            Arc::new(NoPairPool) as Arc<dyn LibnfsContextPool>,
             Fence::new(),
         );
-        let row = test_row(4096, FileTypeTag::Fifo);
+        let row = test_row(4096, FileTypeTag::Unknown);
+
         let outcome = mover.move_one(&row).await;
-        assert_eq!(outcome.strategy, Strategy::Skip);
-        assert!(
-            outcome.result.is_ok(),
-            "Skip must stay a success: {:?}",
-            outcome.result,
-        );
-        assert_eq!(
-            outcome.bytes_moved, 0,
-            "Skip copies nothing and must report 0 bytes, not row.size",
-        );
+
+        assert_eq!(outcome.strategy, Strategy::UnknownType);
+        let err = outcome.result.expect_err("an untyped row must fail");
+        assert_eq!(err.phase, FailurePhase::Open);
+        assert!(err.error.contains("file_type=0"), "{}", err.error);
+        assert_eq!(outcome.bytes_moved, 0);
+        assert!(mover.downgrade_sink().is_empty());
+    }
+
+    /// The other types keep their strategies and still go through the
+    /// pool: only the two settled above bypass it.
+    #[tokio::test]
+    async fn special_handling_does_not_capture_the_other_types() {
+        for (file_type, size) in [
+            (FileTypeTag::Regular, 4096),
+            (FileTypeTag::Regular, 0),
+            (FileTypeTag::Dir, 0),
+            (FileTypeTag::Symlink, 0),
+        ] {
+            let row = test_row(size, file_type);
+            let strategy = strategy::pick(
+                &row,
+                &StrategyContext {
+                    already_copied_inode: false,
+                },
+            );
+            assert!(
+                !matches!(strategy, Strategy::SpecialNotCopied | Strategy::UnknownType),
+                "{file_type:?} size={size}: {strategy:?}"
+            );
+        }
     }
 
     /// F41 acceptance test 6 (red before fix — a type-level red: the

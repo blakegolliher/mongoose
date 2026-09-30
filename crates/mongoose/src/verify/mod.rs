@@ -17,8 +17,10 @@
 //! | file       | present, type, size, mode bits, owner, mtime (µs), SHA-256   |
 //! | directory  | present, type, mode bits, owner                             |
 //! | symlink    | present, type, target bytes (READLINK on both sides)        |
-//! | special    | reported as `special_not_copied` — mongoose does not copy   |
-//! |            | fifos, sockets, or device nodes, so they can never match     |
+//! | special    | mongoose does not copy fifos, sockets, or device nodes. One  |
+//! |            | that is absent from the destination is `special_not_copied`  |
+//! |            | and fails the cutover. One an operator recreated with the    |
+//! |            | same type is compared like a directory: type, mode, owner    |
 //!
 //! plus: every destination path must exist in the source (an extra
 //! fails, including entries the no-delete policy left behind and

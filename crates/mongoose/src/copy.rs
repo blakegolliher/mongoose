@@ -30,7 +30,7 @@ use migration_worker::caps;
 use migration_worker::events::EventEmitter;
 use migration_worker::heartbeat::LivePending;
 use migration_worker::mover_factory::{self, MoverParams};
-use migration_worker::shard_processor::ShardProcessor;
+use migration_worker::shard_processor::{ProcessOutcome, ShardProcessor};
 use migration_worker::throughput::ThroughputCounter;
 use std::path::Path;
 use std::sync::Arc;
@@ -45,12 +45,67 @@ pub struct CopySummary {
     pub files_ok: u64,
     pub files_failed: u64,
     pub files_torn: u64,
+    /// Fifos, sockets, and device nodes that were recognized and NOT
+    /// copied. Not in `files_ok` and not in `files_failed`.
+    pub files_special_not_copied: u64,
     pub bytes_moved: u64,
     /// Stopped by SIGINT/SIGTERM at a batch boundary; re-run
     /// `mongoose copy` to resume from the interrupted shard.
     pub interrupted: bool,
     /// First handled signal, when interrupted.
     pub stop_reason: Option<StopReason>,
+}
+
+impl CopySummary {
+    /// Add one shard's counters (a finished shard, or the batches an
+    /// interrupted one completed).
+    pub fn add_shard(&mut self, outcome: &ProcessOutcome) {
+        self.files_ok += outcome.files_ok;
+        self.files_failed += outcome.files_failed;
+        self.files_torn += outcome.files_torn;
+        self.files_special_not_copied += outcome.files_special_not_copied;
+        self.bytes_moved += outcome.bytes_moved;
+    }
+
+    /// The closing line of a copy. A special-node count is always
+    /// shown when nonzero: those entries are not on the destination.
+    pub fn headline(&self) -> String {
+        let state = if self.interrupted {
+            "interrupted"
+        } else if self.shards_done == self.shards_total {
+            "complete"
+        } else {
+            "stopped"
+        };
+        let special = if self.files_special_not_copied > 0 {
+            format!(", {} special NOT copied", self.files_special_not_copied)
+        } else {
+            String::new()
+        };
+        format!(
+            "{state}: {}/{} shards, {} files ok ({} torn), {} failed{special}, {} bytes moved",
+            self.shards_done,
+            self.shards_total,
+            self.files_ok,
+            self.files_torn,
+            self.files_failed,
+            self.bytes_moved,
+        )
+    }
+}
+
+/// What an operator must know when special nodes were left out: how
+/// many, where the durable records are, and what it means for cutover.
+pub fn special_not_copied_notice(count: u64, downgrades_dir: &Path) -> String {
+    format!(
+        "WARNING: {count} fifo, socket, or device entr{} NOT copied (mongoose does not \
+         create special nodes).\n  \
+         records   {} (SPECIAL_NOT_COPIED, one per entry, with the raw path)\n  \
+         cutover   `mongoose sync --cutover` stays blocked until each is recreated on the \
+         destination or removed from the source",
+        if count == 1 { "y was" } else { "ies were" },
+        downgrades_dir.display(),
+    )
 }
 
 /// In-flight file limits for a `--parallel` level, scaled from the
@@ -228,6 +283,7 @@ pub(crate) async fn run_manifest_with_stop(
         files_ok: progress.files_ok,
         files_failed: progress.files_failed,
         files_torn: progress.files_torn,
+        files_special_not_copied: progress.files_special_not_copied,
         bytes_moved: progress.bytes_moved,
         interrupted: false,
         stop_reason: None,
@@ -283,12 +339,7 @@ pub(crate) async fn run_manifest_with_stop(
             write_shard_jsonl,
             || {
                 if !outcome.interrupted {
-                    progress.files_ok += outcome.files_ok;
-                    progress.files_failed += outcome.files_failed;
-                    progress.files_torn += outcome.files_torn;
-                    progress.bytes_moved += outcome.bytes_moved;
-                    progress.throughput_mb_s_1m = throughput.sample_mb_s(60);
-                    progress.completed_shards.push(shard.path.clone());
+                    progress.record_shard(&shard.path, &outcome, throughput.sample_mb_s(60));
                     progress.write(&wd)?;
                 }
                 Ok(())
@@ -301,10 +352,7 @@ pub(crate) async fn run_manifest_with_stop(
             println!("  downgrades -> {}", p.display());
         }
 
-        summary.files_ok += outcome.files_ok;
-        summary.files_failed += outcome.files_failed;
-        summary.files_torn += outcome.files_torn;
-        summary.bytes_moved += outcome.bytes_moved;
+        summary.add_shard(&outcome);
 
         if outcome.interrupted {
             // Rows already committed are durable; the shard is NOT
@@ -315,7 +363,7 @@ pub(crate) async fn run_manifest_with_stop(
             println!(
                 "  interrupted at a batch boundary ({}/{} rows done); \
                  re-run `mongoose copy` to resume",
-                outcome.files_ok + outcome.files_failed,
+                outcome.rows_processed(),
                 outcome.rows_total
             );
             summary.interrupted = true;
@@ -329,6 +377,17 @@ pub(crate) async fn run_manifest_with_stop(
             "  done: {} ok, {} failed, {} bytes",
             outcome.files_ok, outcome.files_failed, outcome.bytes_moved
         );
+        if outcome.files_special_not_copied > 0 {
+            println!(
+                "  NOT copied: {} fifo, socket, or device entr{} (recorded as downgrades)",
+                outcome.files_special_not_copied,
+                if outcome.files_special_not_copied == 1 {
+                    "y"
+                } else {
+                    "ies"
+                },
+            );
+        }
     }
 
     ticker.abort();
@@ -350,22 +409,13 @@ pub(crate) async fn run_manifest_with_stop(
         progress.write(&wd)?;
     }
 
-    println!(
-        "\n{}: {}/{} shards, {} files ok ({} torn), {} failed, {} bytes moved",
-        if summary.interrupted {
-            "interrupted"
-        } else if summary.shards_done == summary.shards_total {
-            "complete"
-        } else {
-            "stopped"
-        },
-        summary.shards_done,
-        summary.shards_total,
-        summary.files_ok,
-        summary.files_torn,
-        summary.files_failed,
-        summary.bytes_moved,
-    );
+    println!("\n{}", summary.headline());
+    if summary.files_special_not_copied > 0 {
+        println!(
+            "{}",
+            special_not_copied_notice(summary.files_special_not_copied, &wd.downgrades_dir())
+        );
+    }
     if summary.files_failed > 0 {
         println!(
             "per-file failures recorded under {}",
@@ -415,6 +465,7 @@ fn spawn_ticker(
                 inflight = live.inflight(),
                 files_ok = live.files_ok.load(Relaxed),
                 files_failed = live.files_failed.load(Relaxed),
+                special_not_copied = live.files_special_not_copied.load(Relaxed),
                 mb_s_1m = format!("{:.1}", throughput.sample_mb_s(60)),
                 "copying",
             );

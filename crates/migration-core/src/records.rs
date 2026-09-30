@@ -143,6 +143,13 @@ pub struct ProgressRecord {
     /// progress objects from pre-R8 builds still parse.
     #[serde(default)]
     pub files_fenced: u64,
+    /// Fifos, sockets, and device nodes the mover recognized and did
+    /// not create. Processed rows, but neither copied files nor
+    /// failures; each has a `SPECIAL_NOT_COPIED` downgrade record.
+    /// `#[serde(default)]` so progress objects written before the
+    /// counter existed still parse.
+    #[serde(default)]
+    pub files_special_not_copied: u64,
     pub throughput_mb_s_1m: f64,
     /// "active", "degraded", "draining", "exiting".
     pub status: String,
@@ -252,14 +259,25 @@ pub enum FailurePhase {
 // Downgrade
 // =============================================================================
 //
-// A downgrade is a successful copy that had to drop a metadata
+// A downgrade is a row that was processed with less than full
+// fidelity and is not a failure, so the failure-rate metric stays
+// clean and nothing retries it.
+//
+// Most kinds are a successful copy that had to drop a metadata
 // attribute the user asked for — usually because the source row's
 // column was null. The file *is* on dest; the user just doesn't have
-// 100% fidelity. Distinct from failures so the failure-rate metric
-// stays clean.
+// 100% fidelity.
+//
+// `SpecialNotCopied` is the exception: the destination entry does
+// *not* exist. The source entry is a fifo, socket, or device node,
+// which the mover recognizes and deliberately does not create. The
+// record is the durable statement that the entry was seen and left
+// out; the row is counted as `files_special_not_copied`, never as a
+// copied file.
 
 /// A single downgrade event. Format defined in SCHEMA_CONTRACT.md
-/// "Null attribute semantics".
+/// "Null attribute semantics". For `SpecialNotCopied`, `path_b64` is
+/// the path of an entry that is absent from the destination.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DowngradeRecord {
     pub row_id: u64,
@@ -270,9 +288,46 @@ pub struct DowngradeRecord {
     pub ts: UtcTime,
 }
 
+/// The kind of special node a `SpecialNotCopied` record is about: what
+/// an operator has to recreate on the destination, or remove from the
+/// source, before cutover.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SpecialNode {
+    Fifo,
+    Socket,
+    BlockDev,
+    CharDev,
+}
+
+impl SpecialNode {
+    /// The node kind for a canonical tag; `None` for every tag that is
+    /// not a special node, `Unknown` included.
+    pub fn from_tag(tag: crate::schema::FileTypeTag) -> Option<Self> {
+        use crate::schema::FileTypeTag;
+        match tag {
+            FileTypeTag::Fifo => Some(Self::Fifo),
+            FileTypeTag::Socket => Some(Self::Socket),
+            FileTypeTag::BlockDev => Some(Self::BlockDev),
+            FileTypeTag::CharDev => Some(Self::CharDev),
+            FileTypeTag::Unknown
+            | FileTypeTag::Regular
+            | FileTypeTag::Dir
+            | FileTypeTag::Symlink => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DowngradeKind {
+    /// The source entry is a fifo, socket, or device node. The mover
+    /// does not create these, so **no destination entry exists** for
+    /// this row. Not a failure and not retried: the row is processed,
+    /// counted as `files_special_not_copied`, and blocks cutover as a
+    /// `special_not_copied` mismatch until the operator recreates the
+    /// node on the destination or removes it from the source.
+    SpecialNotCopied { node: SpecialNode },
     /// Source `mtime_sec` was null; mover skipped utimes for mtime.
     NullMtime,
     /// Source `atime_sec` was null and atime preservation was
@@ -372,6 +427,8 @@ mod tests {
         assert_eq!(p.host, "host-A");
         assert_eq!(p.held_etag, None);
         assert_eq!(p.heartbeat_sec, 0);
+        // Written before special nodes were counted: reads as zero.
+        assert_eq!(p.files_special_not_copied, 0);
     }
 
     #[test]
@@ -387,6 +444,7 @@ mod tests {
             files_ok: 50,
             files_failed: 0,
             files_fenced: 0,
+            files_special_not_copied: 3,
             throughput_mb_s_1m: 12.5,
             status: "active".into(),
             held_etag: Some("etag-abc".into()),
@@ -397,5 +455,55 @@ mod tests {
         let decoded: ProgressRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.held_etag.as_deref(), Some("etag-abc"));
         assert_eq!(decoded.heartbeat_sec, 30);
+        assert_eq!(decoded.files_special_not_copied, 3);
+    }
+
+    /// The wire form an operator greps for, and the node kind it names.
+    #[test]
+    fn special_not_copied_downgrade_serializes_with_its_node_kind() {
+        for (node, name) in [
+            (SpecialNode::Fifo, "fifo"),
+            (SpecialNode::Socket, "socket"),
+            (SpecialNode::BlockDev, "block_dev"),
+            (SpecialNode::CharDev, "char_dev"),
+        ] {
+            let kind = DowngradeKind::SpecialNotCopied { node };
+            let json = serde_json::to_string(&kind).unwrap();
+            assert_eq!(
+                json,
+                format!(r#"{{"SPECIAL_NOT_COPIED":{{"node":"{name}"}}}}"#)
+            );
+            assert_eq!(serde_json::from_str::<DowngradeKind>(&json).unwrap(), kind);
+        }
+    }
+
+    #[test]
+    fn special_node_exists_only_for_the_four_special_tags() {
+        use crate::schema::FileTypeTag;
+        assert_eq!(
+            SpecialNode::from_tag(FileTypeTag::Fifo),
+            Some(SpecialNode::Fifo)
+        );
+        assert_eq!(
+            SpecialNode::from_tag(FileTypeTag::Socket),
+            Some(SpecialNode::Socket)
+        );
+        assert_eq!(
+            SpecialNode::from_tag(FileTypeTag::BlockDev),
+            Some(SpecialNode::BlockDev)
+        );
+        assert_eq!(
+            SpecialNode::from_tag(FileTypeTag::CharDev),
+            Some(SpecialNode::CharDev)
+        );
+        for tag in [
+            FileTypeTag::Unknown,
+            FileTypeTag::Regular,
+            FileTypeTag::Dir,
+            FileTypeTag::Symlink,
+        ] {
+            assert_eq!(SpecialNode::from_tag(tag), None, "{tag:?}");
+            assert!(!tag.is_special(), "{tag:?}");
+        }
     }
 }
