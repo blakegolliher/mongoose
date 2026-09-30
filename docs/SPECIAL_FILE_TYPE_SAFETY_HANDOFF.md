@@ -238,7 +238,16 @@ In nfs-walker:
    4. Apply the existing bounded retry (`walker::retry::plan` and the scan's
       `RetryPolicy`) only to errors that `FailureKind` already classifies as
       transient. Do not add a separate retry policy.
-   5. If the type still cannot be resolved, count a scan error: record a
+   5. Treat an entry that is confirmed gone as **vanished**, the same way
+      the walker already treats a directory that disappears mid-scan. When
+      resolution returns `NotFound`, or a stale handle whose re-resolution
+      finds nothing, confirm with a LOOKUP of the raw name in the parent
+      directory (`Action::CheckGone` in `walker::retry`). A confirmed-gone
+      entry is recorded with `FailureLog::record_vanished`, emits no row, is
+      not descended into, and does not make the scan incomplete: on a live
+      source it is a race, not a hole in the index. Without that
+      confirmation the entry is unresolved.
+   6. If the type still cannot be resolved, count a scan error: record a
       structured failure in the scan's failure log (`errors.jsonl`) and make
       the scan end in `WalkerError::ScanIncomplete` (the walker CLI exits 3).
       Mongoose's `scan.rs` already maps that error to an incomplete scan it
@@ -391,6 +400,14 @@ The source bundle, SBOM, and provenance must identify the newly pinned walker
 revision. A green unit-test run is not enough if the release lock or SBOM
 still names the old commit.
 
+The `artifact_sha256` values recorded for walker revisions up to `86d7d0a`
+came from builds that used `-C target-cpu=native`, so they do not reproduce on
+another machine. nfs-walker PR #17 replaces that flag with explicit
+`+aes,+sse2`. Pin a walker commit that includes it, and expect the new digest
+to differ from every earlier lock entry. The digest still depends on the build
+account's `~/.cargo` and `~/.rustup` paths, so treat it as evidence from one
+machine and account, not as a cross-machine gate.
+
 ## Required tests
 
 ### nfs-walker
@@ -406,6 +423,10 @@ still names the old commit.
   mode, ownership, and `fsid`;
 - a transient GETATTR or LOOKUP error is retried within the existing bound and
   then succeeds, while a non-transient error is not retried;
+- an entry deleted before it can be resolved, and confirmed gone by LOOKUP,
+  is recorded as vanished, emits no row, and leaves the scan complete;
+- a `NotFound` that the confirming LOOKUP contradicts (the name still
+  exists) is unresolved, not vanished;
 - an entry that stays unresolved records a structured failure, ends the scan
   in `ScanIncomplete`, emits no `Unknown` row, and is not descended into;
 - a LOOKUP whose `fileid` differs from the READDIRPLUS entry is treated as
