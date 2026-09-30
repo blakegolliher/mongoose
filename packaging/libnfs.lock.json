@@ -5,6 +5,6 @@
   "license": "LGPL-2.1-or-later",
   "release_linkage": "static",
   "static_artifact_sha256": "36822790290a78787cc4e8f029808d2eeef0bf62beb192bc49ec4e369ea666f0",
-  "static_artifact_build": "scripts/build-libnfs-static.sh with Zig 0.16.0 (including Zig ar/ranlib) and CMake 3.28.3",
+  "static_artifact_build": "scripts/build-libnfs-static.sh with upstream Zig 0.16.0 (LLVM 21.1.0, including Zig ar/ranlib) and CMake 3.28.3",
   "target": "x86_64-unknown-linux-gnu.2.34"
 }

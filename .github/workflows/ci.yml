@@ -81,13 +81,7 @@ jobs:
       - name: Install locked Zig
         run: |
           zig_version=$(jq -r .zig packaging/release-toolchain.lock.json)
-          # SHA-256 of the official x86_64-linux tarball, from
-          # https://ziglang.org/download/index.json. Add the matching digest
-          # here whenever the lock's Zig version changes.
-          case "$zig_version" in
-            0.16.0) zig_sha256=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00 ;;
-            *) echo "::error::no pinned tarball digest for Zig $zig_version"; exit 1 ;;
-          esac
+          zig_sha256=$(jq -er .zig_x86_64_linux_tarball_sha256 packaging/release-toolchain.lock.json)
           curl -fsSL --retry 3 -o "$RUNNER_TEMP/zig.tar.xz" \
             "https://ziglang.org/download/$zig_version/zig-x86_64-linux-$zig_version.tar.xz"
           echo "$zig_sha256  $RUNNER_TEMP/zig.tar.xz" | sha256sum -c -
@@ -107,6 +101,7 @@ jobs:
           echo "libnfs $url @ $sha"
           EXPECTED_LIBNFS_SHA256="$(jq -er .static_artifact_sha256 packaging/libnfs.lock.json)" \
           EXPECTED_ZIG_VERSION="$(jq -r .zig packaging/release-toolchain.lock.json)" \
+          EXPECTED_ZIG_LLVM_VERSION="$(jq -r .zig_llvm packaging/release-toolchain.lock.json)" \
           ZIG="$RUNNER_TEMP/zig/zig" \
           ./scripts/build-libnfs-static.sh \
             --source "$RUNNER_TEMP/libnfs" \

@@ -17,6 +17,8 @@ self-contained for Rust dependencies and can be built with Cargo offline.
 - Cargo: `@CARGO_VERSION@`
 - cargo-zigbuild: `@CARGO_ZIGBUILD_VERSION@`
 - Zig: `@ZIG_VERSION@`
+- Zig LLVM: `@ZIG_LLVM_VERSION@`
+- upstream Zig x86_64-linux tarball SHA-256: `@ZIG_TARBALL_SHA256@`
 - CMake: `@CMAKE_VERSION@`
 - GNU binutils (binary inspection): `@BINUTILS_VERSION@`
 

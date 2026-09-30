@@ -116,6 +116,7 @@ libnfs-stage:
 	mkdir -p $(LIBNFS_STAGE)
 	ZIG=$(ZIG) \
 	EXPECTED_ZIG_VERSION=$$(jq -r .zig packaging/release-toolchain.lock.json) \
+	EXPECTED_ZIG_LLVM_VERSION=$$(jq -r .zig_llvm packaging/release-toolchain.lock.json) \
 	EXPECTED_LIBNFS_SHA256=$$(jq -r .static_artifact_sha256 $(LIBNFS_LOCK)) \
 	./scripts/build-libnfs-static.sh --source "$(LIBNFS_SOURCE)" --output "$(LIBNFS_STAGE)"
 
