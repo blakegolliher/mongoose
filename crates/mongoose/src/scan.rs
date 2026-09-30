@@ -44,12 +44,13 @@ pub struct ScanCheckpoint {
     pub walker_version: String,
     pub scan_url: String,
     pub finished_utc: String,
-    /// Directories the walker could not read. Always 0 on a complete
-    /// checkpoint; an incomplete attempt records what it found.
+    /// Directories the walker could not read, plus entries whose type
+    /// it could not establish. Always 0 on a complete checkpoint; an
+    /// incomplete attempt records what it found.
     #[serde(default)]
     pub errors: u64,
-    /// Directories that disappeared during the scan (a race on a live
-    /// tree; not an error).
+    /// Directories and entries that disappeared during the scan (a race
+    /// on a live tree; not an error).
     #[serde(default)]
     pub vanished: u64,
     /// The attempt directory this checkpoint describes.
@@ -81,11 +82,10 @@ pub fn accept_scan(stats: &WalkStats) -> Result<()> {
         "the scan was interrupted before completion; re-run to rescan"
     );
     anyhow::ensure!(
-        stats.errors == 0,
-        "the walker reported {} unreadable director{} but did not fail the scan; refusing to \
-         checkpoint an incomplete index",
-        stats.errors,
-        if stats.errors == 1 { "y" } else { "ies" },
+        stats.errors == 0 && stats.unresolved_entries == 0,
+        "the walker reported that {} but did not fail the scan; refusing to checkpoint an \
+         incomplete index",
+        nfs_walker::error::incomplete_reason(stats),
     );
     Ok(())
 }
@@ -93,9 +93,11 @@ pub fn accept_scan(stats: &WalkStats) -> Result<()> {
 /// Why the embedded walker did not produce an acceptable scan.
 #[derive(Debug)]
 pub enum ScanFailure {
-    /// The walker ran to the end but could not read every directory.
+    /// The walker ran to the end but could not read every directory,
+    /// or could not establish the type of every entry.
     Incomplete {
-        stats: WalkStats,
+        /// Boxed, as the walker hands it over, to keep this error small.
+        stats: Box<WalkStats>,
         failures: Vec<DirFailure>,
         failure_log: Option<PathBuf>,
     },
@@ -116,12 +118,11 @@ pub fn incomplete_message(
     failure_log: Option<&Path>,
     walker_log: &Path,
 ) -> String {
+    // The walker words what is missing: unreadable directories, and
+    // entries whose type it could not establish.
     let mut msg = format!(
-        "scan of {scan_url} is incomplete: {} director{} could not be read ({} vanished during \
-         the scan); nothing was checkpointed\n",
-        stats.errors,
-        if stats.errors == 1 { "y" } else { "ies" },
-        stats.vanished,
+        "scan of {scan_url} is incomplete: {}; nothing was checkpointed\n",
+        nfs_walker::error::incomplete_reason(stats),
     );
     for f in failures.iter().take(FAILURE_SAMPLE) {
         msg.push_str(&format!(
@@ -251,6 +252,16 @@ pub async fn ensure_scan(wd: &WorkDir, params: &ScanParams) -> Result<ScanCheckp
         "  found {} dirs, {} files, {} bytes in {:.0?} ({} vanished during the scan)",
         stats.dirs, stats.files, stats.bytes, stats.duration, stats.vanished,
     );
+    let resolved = stats.resolved_by_getattr + stats.resolved_by_lookup;
+    if resolved > 0 {
+        // Worth knowing: each cost an extra RPC, and a server that
+        // does this for many entries slows the scan down.
+        println!(
+            "  the server returned {resolved} entries without attributes; the scan fetched them \
+             separately ({} by GETATTR, {} by LOOKUP)",
+            stats.resolved_by_getattr, stats.resolved_by_lookup,
+        );
+    }
     let scan_dir = tools::resolve_scan_dir(&invocation.output)?;
 
     let cp = ScanCheckpoint {
@@ -463,6 +474,7 @@ mod tests {
             vanished: 1,
             duration: std::time::Duration::from_secs(1),
             completed,
+            ..WalkStats::default()
         }
     }
 
@@ -473,12 +485,12 @@ mod tests {
         accept_scan(&stats(true, 0)).unwrap();
         let err = accept_scan(&stats(true, 3)).unwrap_err();
         assert!(
-            format!("{err:#}").contains("3 unreadable directories"),
+            format!("{err:#}").contains("3 directories could not be read"),
             "{err:#}"
         );
         let err = accept_scan(&stats(true, 1)).unwrap_err();
         assert!(
-            format!("{err:#}").contains("1 unreadable directory"),
+            format!("{err:#}").contains("1 directory could not be read"),
             "{err:#}"
         );
         let err = accept_scan(&stats(false, 0)).unwrap_err();
@@ -580,6 +592,45 @@ mod tests {
         assert!(msg.contains("errors.jsonl"), "{msg}");
         assert!(msg.contains("walker-progress.jsonl"), "{msg}");
         assert!(msg.contains("nothing was checkpointed"), "{msg}");
+    }
+
+    /// An entry whose type the walker could not establish fails the
+    /// scan like an unreadable directory, and the message says which
+    /// of the two it was.
+    #[test]
+    fn incomplete_message_names_entries_whose_type_is_unknown() {
+        let failures = vec![DirFailure {
+            path: "/data/mnt".into(),
+            kind: nfs_walker::error::FailureKind::PermissionDenied,
+            error: "Permission denied: '/data/mnt'".into(),
+            attempts: 1,
+        }];
+        let unresolved = WalkStats {
+            unresolved_entries: 1,
+            ..stats(true, 1)
+        };
+        let msg = incomplete_message(
+            "nfs://old/export",
+            &unresolved,
+            &failures,
+            Path::new("/w/scan/attempt-0001"),
+            None,
+            Path::new("/w/scan/attempt-0001/walker-progress.jsonl"),
+        );
+        assert!(
+            msg.contains("the type of 1 entry could not be established"),
+            "{msg}"
+        );
+        let headline = msg.lines().next().unwrap();
+        assert!(
+            !headline.contains("director"),
+            "no directory failed: {headline}"
+        );
+        assert!(msg.contains("permission_denied  /data/mnt"), "{msg}");
+        assert!(msg.contains("nothing was checkpointed"), "{msg}");
+
+        let err = accept_scan(&unresolved).unwrap_err().to_string();
+        assert!(err.contains("the type of 1 entry"), "{err}");
     }
 
     #[test]

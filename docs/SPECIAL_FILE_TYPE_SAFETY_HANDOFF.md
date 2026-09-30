@@ -1,7 +1,14 @@
 # Special-file and type-safety implementation handoff
 
-Status: **ready for implementation.** The hardlink prerequisite below landed on
-both repositories' `main` branches on 2026-09-30.
+Status: **implemented in software on 2026-09-30; real-NFS qualification is
+still outstanding and remains a release blocker.** The walker half is
+nfs-walker PR #18 (commit `4dcaee499f6301673f97ad57c1d0e165a08cf29a`); the
+mongoose half is the change that carries this status line, which pins that
+walker commit. Neither has run against a real NFS server: see "Real-NFS
+qualification" below.
+
+The hardlink prerequisite below landed on both repositories' `main` branches
+on 2026-09-30.
 
 This is the next production-readiness slice after byte-safe paths and hardlink
 safety. It closes two related correctness holes:

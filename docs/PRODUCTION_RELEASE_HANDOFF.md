@@ -720,6 +720,10 @@ truthful special-node omission records and counters, cutover behavior, and
 real-NFS qualification. Its hardlink-safety merge prerequisite was resolved on
 2026-09-30 (nfs-walker PR #15, mongoose PR #17).
 
+Status (2026-09-30): implemented in software (nfs-walker PR #18 and the
+mongoose change that pins it). Its real-NFS qualification has not been run and
+remains a release blocker.
+
 ## Production release exit criteria
 
 The release owner can remove the block only when all of the following are true:
