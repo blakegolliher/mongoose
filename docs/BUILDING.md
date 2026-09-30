@@ -7,9 +7,10 @@ Requires Rust 1.91+ and the exact static `libnfs.a` pinned by
 pass a version check but omit the raw NFSv3 task symbols mongoose uses.
 
 From a fresh clone, fetch the pinned libnfs source and build its verified
-archive first. The archive build requires Zig 0.16.0, CMake, GNU ar and GNU
-ranlib. The lock file remains the source of truth for the repository and
-revision:
+archive first. The archive build requires Zig 0.16.0 and CMake; it uses the
+`ar` and `ranlib` subcommands supplied by that pinned Zig toolchain so host
+binutils versions do not change the archive. The lock file remains the source
+of truth for the repository and revision:
 
 ```bash
 libnfs_url=$(jq -r .source_url packaging/libnfs.lock.json)
@@ -63,13 +64,15 @@ the checkout or Zig lives. With the tool versions below, it must match
 repeat the two-path check, build twice with `ZIG` pointing at copies of the
 same Zig installed in two different directories, then `cmp` the two archives.
 
-Evidence (2026-09-29; Zig 0.16.0, CMake 3.28.3, GNU ar/ranlib 2.42): the
+Path evidence (2026-09-29; Zig 0.16.0 and CMake 3.28.3): the
 pinned source was built with Zig at three absolute paths. These were the snap
 at `/snap/zig/16117`, and the official tarball, byte-identical to the snap, at
 two other directories. A shallow `git fetch` of the source in a separate
 directory was also built. All four archives were byte-identical, SHA-256
 `36822790290a78787cc4e8f029808d2eeef0bf62beb192bc49ec4e369ea666f0`. Before the
 Zig directory was mapped, the three Zig locations gave three different digests.
+Switching archive creation from host GNU ar/ranlib to Zig's pinned LLVM
+ar/ranlib preserved that digest in two independent builds.
 
 The exact Rust, cargo-zigbuild, Zig, CMake, binutils, tar, gzip, and
 cargo-about versions used for releases are recorded in

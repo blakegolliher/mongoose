@@ -18,7 +18,10 @@ self-contained for Rust dependencies and can be built with Cargo offline.
 - cargo-zigbuild: `@CARGO_ZIGBUILD_VERSION@`
 - Zig: `@ZIG_VERSION@`
 - CMake: `@CMAKE_VERSION@`
-- GNU ar/ranlib: `@BINUTILS_VERSION@`
+- GNU binutils (binary inspection): `@BINUTILS_VERSION@`
+
+The libnfs archive is created with the `ar` and `ranlib` subcommands supplied
+by the pinned Zig toolchain, rather than host binutils.
 
 The official archive was built by `build-libnfs-static.sh`. Its path-remapping
 flags make an unmodified `libnfs.a` independent of both the checkout directory
