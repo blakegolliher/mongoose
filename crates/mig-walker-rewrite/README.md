@@ -36,6 +36,11 @@ leading slash (`/m2-verify/file.bin`). The shim strips this prefix.
 If a walker path does not begin with `--source-root`, the shim refuses
 the shard rather than emit a corrupted path.
 
+Current walker shards also contain an authoritative Binary `path_bytes`
+column. The shim prefers it and preserves arbitrary POSIX filename bytes.
+Older shards without that column remain readable through the legacy UTF-8
+`path` column.
+
 Output filenames mirror input filenames. Shard indices for `row_id`
 materialization are assigned in lexicographic order of input
 filenames; running the shim twice on the same input produces

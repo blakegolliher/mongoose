@@ -233,8 +233,9 @@ steady-state overhead ≈ 2 indexes (~80 GB at 600M files).
 - **Dir mtimes.** Delta passes restamp only dirs that appear in the
   delta; a dir whose mtime changed classifies DIRTY via ctime/mtime
   and gets restamped. Root mtime restore runs per pass as today.
-- **Non-UTF-8 paths** remain bounded by the walker's Utf8 path
-  column (pre-existing; fix belongs in the walker).
+- **Non-UTF-8 paths** use the walker's authoritative Binary path column;
+  legacy walker shards without it remain limited to their original UTF-8
+  representation.
 
 ---
 
