@@ -2,12 +2,32 @@
 
 ## Build
 
-Requires Rust 1.91+ and libnfs. Release builds always use the exact static
-`libnfs.a` pinned by `packaging/libnfs.lock.json`; ordinary host builds may use
-the system library through pkg-config.
+Requires Rust 1.91+ and the exact static `libnfs.a` pinned by
+`packaging/libnfs.lock.json`. Distro libnfs packages are not supported: some
+pass a version check but omit the raw NFSv3 task symbols mongoose uses.
+
+From a fresh clone, fetch the pinned libnfs source and build its verified
+archive first. The archive build requires Zig 0.16.0, CMake, GNU ar and GNU
+ranlib. The lock file remains the source of truth for the repository and
+revision:
 
 ```bash
-cargo build --release -p mongoose
+libnfs_url=$(jq -r .source_url packaging/libnfs.lock.json)
+libnfs_sha=$(jq -r .source_git_sha packaging/libnfs.lock.json)
+git init -q ../libnfs
+git -C ../libnfs fetch --depth 1 "$libnfs_url" "$libnfs_sha"
+git -C ../libnfs checkout --detach FETCH_HEAD
+make libnfs-stage LIBNFS_SOURCE=../libnfs
+make
+```
+
+`make` verifies the staged archive against the lock before compiling and sets
+both native consumers to link it statically. A bare `cargo build` is rejected
+unless `VAMOOSE_LIBNFS_DIR` and `NFS_WALKER_LIBNFS_DIR` name that stage.
+
+```bash
+./target/release/mongoose --version
+ldd ./target/release/mongoose
 ```
 
 x86_64 builds need `-C target-feature=+aes,+sse2` (the walker's gxhash

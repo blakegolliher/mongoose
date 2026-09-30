@@ -1,6 +1,6 @@
 # Build and package mongoose.
 #
-#   make build     host release binary (target/release/mongoose)
+#   make build     host release binary linked with pinned libnfs
 #   make rpm       binary RPM + man page        -> dist/
 #   make deb       binary DEB + man page        -> dist/
 #   make tarball   plain tar.gz (binary + man)  -> dist/
@@ -17,9 +17,8 @@
 # Packages and the tarball are PORTABLE by default: built with
 # cargo-zigbuild against glibc $(GLIBC) and the digest-pinned libnfs
 # stage (see packaging/libnfs.lock.json), then gated on the binary's
-# max GLIBC_* symbol version. `make rpm PORTABLE=0` opts out and
-# packages a host build instead (links whatever libnfs pkg-config
-# finds — do not ship those).
+# max GLIBC_* symbol version. `make rpm PORTABLE=0` opts out of the
+# glibc portability target, but still links the pinned static libnfs.
 #
 # The stage dir must hold the pinned archive from the lock file:
 #   libnfs.a    both native consumers link this exact static archive
@@ -84,7 +83,9 @@ COMPLIANCE_ASSETS := \
 
 all: build
 
-build:
+build: stage-check
+	VAMOOSE_LIBNFS_DIR=$(LIBNFS_STAGE) \
+	NFS_WALKER_LIBNFS_DIR=$(LIBNFS_STAGE) \
 	cargo build --release -p mongoose
 
 # --- portable build --------------------------------------------------
