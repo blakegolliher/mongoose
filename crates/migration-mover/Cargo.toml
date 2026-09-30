@@ -23,6 +23,3 @@ serde_json = { workspace = true }
 chrono     = { workspace = true }
 futures    = { workspace = true }
 xxhash-rust = { workspace = true }
-
-[build-dependencies]
-pkg-config = "0.3"

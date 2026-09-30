@@ -46,9 +46,16 @@ test -n "$zig_bin" || fail "Zig is required; set ZIG=/path/to/zig"
 expected_zig=${EXPECTED_ZIG_VERSION:-0.16.0}
 actual_zig=$($zig_bin version 2>/dev/null) || fail "cannot execute Zig at $zig_bin"
 test "$actual_zig" = "$expected_zig" || fail "Zig $expected_zig required, found $actual_zig"
+expected_zig_llvm=${EXPECTED_ZIG_LLVM_VERSION:-21.1.0}
+actual_zig_llvm=$(
+    "$zig_bin" ar --version 2>/dev/null \
+        | sed -n 's/^[[:space:]]*LLVM version \([^[:space:]]*\).*$/\1/p' \
+        | head -n1
+)
+test -n "$actual_zig_llvm" || fail "cannot read LLVM version from '$zig_bin ar --version'"
+test "$actual_zig_llvm" = "$expected_zig_llvm" || fail \
+    "official Zig $expected_zig with LLVM $expected_zig_llvm required; '$zig_bin' uses LLVM $actual_zig_llvm"
 command -v cmake >/dev/null 2>&1 || fail "cmake is required"
-command -v ar >/dev/null 2>&1 || fail "GNU ar is required"
-command -v ranlib >/dev/null 2>&1 || fail "GNU ranlib is required"
 
 # The libc and compiler headers come from Zig's lib directory, and their
 # absolute paths land in the archive's debug info. Map it to a fixed name so
@@ -66,6 +73,16 @@ build_dir="$build_root/build"
 case "$source_dir$build_dir$zig_lib_dir" in
     *[[:space:]]*) fail "source, build, and Zig lib paths must not contain whitespace" ;;
 esac
+
+# Use the archiver shipped with the pinned Zig toolchain so the archive format
+# and index do not depend on the host distribution's binutils version. Small
+# wrappers let CMake invoke Zig's `ar` and `ranlib` subcommands using its normal
+# tool interface.
+zig_ar="$build_root/zig-ar"
+zig_ranlib="$build_root/zig-ranlib"
+printf '#!/usr/bin/env bash\nexec %q ar "$@"\n' "$zig_bin" >"$zig_ar"
+printf '#!/usr/bin/env bash\nexec %q ranlib "$@"\n' "$zig_bin" >"$zig_ranlib"
+chmod 0755 "$zig_ar" "$zig_ranlib"
 
 c_flags="-target x86_64-linux-gnu.2.34"
 c_flags+=" -ffile-prefix-map=$source_dir=/usr/src/libnfs"
@@ -91,8 +108,8 @@ cmake -S "$source_dir" -B "$build_dir" \
     -DCMAKE_C_COMPILER="$zig_bin" \
     -DCMAKE_C_COMPILER_ARG1=cc \
     "-DCMAKE_C_FLAGS=$c_flags" \
-    -DCMAKE_AR="$(command -v ar)" \
-    -DCMAKE_RANLIB="$(command -v ranlib)"
+    -DCMAKE_AR="$zig_ar" \
+    -DCMAKE_RANLIB="$zig_ranlib"
 cmake --build "$build_dir" --parallel
 
 install -m0644 "$build_dir/lib/libnfs.a" "$output_dir/libnfs.a"

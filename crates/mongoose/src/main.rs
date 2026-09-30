@@ -30,7 +30,11 @@ fn exit_code_for(outcome: ExitOutcome) -> ExitCode {
 /// folds to `true` at compile time.
 #[cfg(target_arch = "x86_64")]
 fn cpu_has_aes_ni() -> bool {
-    let leaf1 = std::arch::x86_64::__cpuid(1);
+    // SAFETY: CPUID is available on mongoose's supported Linux x86-64
+    // targets. Rust before 1.94 declares this intrinsic unsafe; Rust 1.94+
+    // declares it safe, so keep the block compatible with both API shapes.
+    #[allow(unused_unsafe)]
+    let leaf1 = unsafe { std::arch::x86_64::__cpuid(1) };
     let aes = leaf1.ecx & (1 << 25) != 0;
     let sse2 = leaf1.edx & (1 << 26) != 0;
     aes && sse2
