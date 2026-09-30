@@ -241,8 +241,9 @@ In nfs-walker:
    5. Treat an entry that is confirmed gone as **vanished**, the same way
       the walker already treats a directory that disappears mid-scan. When
       resolution returns `NotFound`, or a stale handle whose re-resolution
-      finds nothing, confirm with a LOOKUP of the raw name in the parent
-      directory (`Action::CheckGone` in `walker::retry`). A confirmed-gone
+      finds nothing, confirm by resolving the entry's path from the export
+      root, the same call that confirms a vanished directory
+      (`Action::CheckGone` in `walker::retry`). A confirmed-gone
       entry is recorded with `FailureLog::record_vanished`, emits no row, is
       not descended into, and does not make the scan incomplete: on a live
       source it is a race, not a hole in the index. Without that
@@ -260,11 +261,16 @@ In nfs-walker:
    READDIRPLUS attributes would have supplied (type, size, mode, ownership,
    link count, times, and `fsid`), so a resolved row is indistinguishable from
    an ordinary one. A directory resolved this way is queued for traversal with
-   its handle like any other directory. If a LOOKUP resolves an object whose
-   `fileid` differs from the READDIRPLUS entry's `fileid`, the name was
-   replaced mid-scan; treat that as unresolved rather than mixing the two
-   objects' identities. Count fallback GETATTR and LOOKUP resolutions in the
-   scan summary so operators can see a server that omits attributes.
+   its handle like any other directory. A resolved row takes its identity
+   from the resolved attributes too: its `inode` is the resolved `fileid`,
+   not the number in the READDIRPLUS entry. The two differ legitimately. The
+   Linux server omits attributes and the handle for every mountpoint, and the
+   LOOKUP then returns the root of the mounted filesystem, whose `fileid` is
+   not the mounted-on directory's. Taking everything from one reply keeps the
+   row about one object, the one the name refers to now. Do not compare the
+   two numbers, and do not fail on a difference. Count fallback GETATTR and
+   LOOKUP resolutions in the scan summary so operators can see a server that
+   omits attributes.
 2. Add a single typed conversion function from `EntryType` to the stable
    analytics string. Keep the existing strings and schema unchanged.
 3. Ensure the Parquet builder uses that conversion and cannot obtain a type
@@ -429,8 +435,9 @@ machine and account, not as a cross-machine gate.
   exists) is unresolved, not vanished;
 - an entry that stays unresolved records a structured failure, ends the scan
   in `ScanIncomplete`, emits no `Unknown` row, and is not descended into;
-- a LOOKUP whose `fileid` differs from the READDIRPLUS entry is treated as
-  unresolved;
+- an entry whose resolved `fileid` differs from the READDIRPLUS entry's, as
+  a mountpoint's does, is resolved, and its row carries the resolved `inode`
+  and `fsid`;
 - the builder returns an error, rather than writing a row, when handed
   `EntryType::Unknown`;
 - byte-path and fsid regression tests still pass;
