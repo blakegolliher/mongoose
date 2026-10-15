@@ -2,12 +2,44 @@
 
 ## Build
 
-Requires Rust 1.91+ and libnfs. Release builds always use the exact static
-`libnfs.a` pinned by `packaging/libnfs.lock.json`; ordinary host builds may use
-the system library through pkg-config.
+Requires Rust 1.91+ and the exact static `libnfs.a` pinned by
+`packaging/libnfs.lock.json`. Distro libnfs packages are not supported: some
+pass a version check but omit the raw NFSv3 task symbols mongoose uses.
+
+From a fresh clone, install the checksum-pinned upstream Zig distribution,
+then fetch the pinned libnfs source and build its verified archive. A distro
+rebuild that prints the same Zig version is not equivalent: its bundled LLVM
+can produce different object files. The archive build also requires CMake and
+uses the `ar` and `ranlib` subcommands supplied by Zig, so host binutils
+versions do not change the archive. The lock files remain the source of truth:
 
 ```bash
-cargo build --release -p mongoose
+zig_version=$(jq -r .zig packaging/release-toolchain.lock.json)
+zig_sha=$(jq -r .zig_x86_64_linux_tarball_sha256 packaging/release-toolchain.lock.json)
+curl -fsSL --retry 3 -o /tmp/mongoose-zig.tar.xz \
+  "https://ziglang.org/download/$zig_version/zig-x86_64-linux-$zig_version.tar.xz"
+echo "$zig_sha  /tmp/mongoose-zig.tar.xz" | sha256sum -c -
+mkdir -p "$HOME/.local/toolchains"
+zig_root=$(mktemp -d "$HOME/.local/toolchains/zig-$zig_version.XXXXXX")
+tar -xJf /tmp/mongoose-zig.tar.xz -C "$zig_root" --strip-components=1
+export ZIG="$zig_root/zig"
+
+libnfs_url=$(jq -r .source_url packaging/libnfs.lock.json)
+libnfs_sha=$(jq -r .source_git_sha packaging/libnfs.lock.json)
+git init -q ../libnfs
+git -C ../libnfs fetch --depth 1 "$libnfs_url" "$libnfs_sha"
+git -C ../libnfs checkout --detach FETCH_HEAD
+make libnfs-stage LIBNFS_SOURCE=../libnfs
+make
+```
+
+`make` verifies the staged archive against the lock before compiling and sets
+both native consumers to link it statically. A bare `cargo build` is rejected
+unless `VAMOOSE_LIBNFS_DIR` and `NFS_WALKER_LIBNFS_DIR` name that stage.
+
+```bash
+./target/release/mongoose --version
+ldd ./target/release/mongoose
 ```
 
 x86_64 builds need `-C target-feature=+aes,+sse2` (the walker's gxhash
@@ -43,13 +75,17 @@ the checkout or Zig lives. With the tool versions below, it must match
 repeat the two-path check, build twice with `ZIG` pointing at copies of the
 same Zig installed in two different directories, then `cmp` the two archives.
 
-Evidence (2026-09-29; Zig 0.16.0, CMake 3.28.3, GNU ar/ranlib 2.42): the
+Path evidence (2026-09-29; Zig 0.16.0 and CMake 3.28.3): the
 pinned source was built with Zig at three absolute paths. These were the snap
 at `/snap/zig/16117`, and the official tarball, byte-identical to the snap, at
 two other directories. A shallow `git fetch` of the source in a separate
 directory was also built. All four archives were byte-identical, SHA-256
 `36822790290a78787cc4e8f029808d2eeef0bf62beb192bc49ec4e369ea666f0`. Before the
 Zig directory was mapped, the three Zig locations gave three different digests.
+Switching archive creation from host GNU ar/ranlib to upstream Zig's pinned
+LLVM ar/ranlib preserved that digest in two independent builds. Distro Zig
+0.16.0 built with LLVM 21.1.8 is rejected; upstream Zig 0.16.0 uses the locked
+LLVM 21.1.0.
 
 The exact Rust, cargo-zigbuild, Zig, CMake, binutils, tar, gzip, and
 cargo-about versions used for releases are recorded in

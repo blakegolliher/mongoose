@@ -2356,7 +2356,6 @@ dependencies = [
  "futures",
  "libc",
  "migration-core",
- "pkg-config",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",

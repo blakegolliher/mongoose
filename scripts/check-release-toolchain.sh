@@ -52,6 +52,18 @@ check rustc rustc rustc --version
 check cargo cargo cargo --version
 check cargo-zigbuild cargo_zigbuild cargo-zigbuild --version
 check zig zig "$zig_bin" version
+want_zig_llvm=$(jq -er .zig_llvm "$lock")
+actual_zig_llvm=$(
+    "$zig_bin" ar --version 2>/dev/null \
+        | sed -n 's/^[[:space:]]*LLVM version \([^[:space:]]*\).*$/\1/p' \
+        | head -n1
+)
+if test "$actual_zig_llvm" = "$want_zig_llvm"; then
+    echo "  zig LLVM $want_zig_llvm"
+else
+    echo "  zig LLVM: locked $want_zig_llvm, found: ${actual_zig_llvm:-unknown}" >&2
+    mismatches=$((mismatches + 1))
+fi
 check cmake cmake cmake --version
 for tool in ar ranlib objdump readelf; do
     check "$tool" binutils "$tool" --version

@@ -84,6 +84,8 @@ rustc_version=$(jq -er .rustc packaging/release-toolchain.lock.json)
 cargo_version=$(jq -er .cargo packaging/release-toolchain.lock.json)
 cargo_zigbuild_version=$(jq -er .cargo_zigbuild packaging/release-toolchain.lock.json)
 zig_version=$(jq -er .zig packaging/release-toolchain.lock.json)
+zig_llvm_version=$(jq -er .zig_llvm packaging/release-toolchain.lock.json)
+zig_tarball_sha=$(jq -er .zig_x86_64_linux_tarball_sha256 packaging/release-toolchain.lock.json)
 cmake_version=$(jq -er .cmake packaging/release-toolchain.lock.json)
 binutils_version=$(jq -er .binutils packaging/release-toolchain.lock.json)
 
@@ -111,6 +113,8 @@ render() {
         -e "s|@CARGO_VERSION@|$cargo_version|g" \
         -e "s|@CARGO_ZIGBUILD_VERSION@|$cargo_zigbuild_version|g" \
         -e "s|@ZIG_VERSION@|$zig_version|g" \
+        -e "s|@ZIG_LLVM_VERSION@|$zig_llvm_version|g" \
+        -e "s|@ZIG_TARBALL_SHA256@|$zig_tarball_sha|g" \
         -e "s|@CMAKE_VERSION@|$cmake_version|g" \
         -e "s|@BINUTILS_VERSION@|$binutils_version|g" \
         "$1"
