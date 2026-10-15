@@ -248,6 +248,9 @@ pub async fn run_with_stop(
         same_server: manifest.source.url == manifest.dest.url,
         source_url: manifest.source.url.clone(),
         dest_url: manifest.dest.url.clone(),
+        // The distributed worker connects by host name, as before.
+        source_targets: Vec::new(),
+        dest_targets: Vec::new(),
         source_root: manifest.source.root.clone(),
         dest_root: manifest.dest.root.clone(),
         options: opts.clone(),

@@ -18,6 +18,25 @@ on disk, how resume works, what it guarantees, and what it does not do.
    size class (small < 1 MiB, medium up to 1 GiB, large above) scaled
    from `--parallel`.
 
+**Connections.** `--parallel N` opens N source/destination connection
+pairs. When a server's host name is round-robin DNS, as a VAST
+cluster's virtual IPs are, mongoose queries the name repeatedly until it
+stops showing new addresses, then gives pair `i` address `i mod k`, so
+every address carries an even share. A VAST cluster's DNS serves each
+address for a fraction of a second before moving to the next, so this
+takes a few seconds, once per name per command. An address that will not mount is
+skipped and its share goes to the rest. The copy and the cutover
+read-back both print a `connections:` line with the addresses used and
+how many connections each carries. A URL with an explicit port, or a
+name whose addresses cannot be listed (no `host` command, or DNS does
+not answer for it), connects by name, as before. DNS answers are used
+only when they include an address the system resolver returned, so a
+name pinned in `/etc/hosts` to an address DNS does not serve stays on
+that address. To use exactly one address, put it in the URL
+(`nfs://172.200.204.1/export`). The scan hands the same address list
+to the scanner (`--server-ips`), so its workers spread over the same
+addresses.
+
 `mongoose sync` runs one converging pass: rescan, rewrite (the rescan
 becomes the next baseline), classify every entry against the previous
 baseline on `(file_type, size, mtime, ctime)`, emit the new and changed

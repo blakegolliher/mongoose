@@ -466,17 +466,22 @@ pub struct LibnfsChecker {
 }
 
 impl LibnfsChecker {
-    /// Mount `pairs` context pairs against both URLs.
+    /// Mount `pairs` context pairs against both URLs, spread over each
+    /// side's `targets` (see `MultiPool::build_spread`; empty connects
+    /// by host name).
     pub fn mount(
         src_url: &str,
         dst_url: &str,
         src_root: &str,
         dst_root: &str,
         pairs: usize,
+        targets: &crate::endpoint::ConnectionTargets,
     ) -> Result<Arc<Self>> {
-        let pool = MultiPool::build(
+        let pool = MultiPool::build_spread(
             src_url,
             dst_url,
+            &targets.src,
+            &targets.dst,
             pairs.max(1),
             migration_mover::DEFAULT_RPC_TIMEOUT_MS,
         )?;
@@ -485,6 +490,10 @@ impl LibnfsChecker {
             src = src_url,
             dst = dst_url,
             "verification pool mounted"
+        );
+        println!(
+            "  connections: {}",
+            crate::endpoint::describe_pool(pool.targets())
         );
         Ok(Arc::new(Self {
             pool,

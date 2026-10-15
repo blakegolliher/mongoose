@@ -110,6 +110,10 @@ destination, or the source, and run `--cutover` again.
   and the source export has to let root read everything. Directory
   timestamps are restored on a best-effort basis and are not part of
   what `--cutover` checks.
+- **Every address of a server is used.** If the server's name is
+  round-robin DNS (a VAST cluster's virtual IPs), the connections are
+  spread evenly over all of its addresses. The `connections:` line
+  shows which addresses were used.
 - **Deleting on the old server never deletes on the new one.** A sync
   notices deletions and writes them to
   `<work-dir>/passes/pass-NNNN/classify/deleted.jsonl`, but leaves the
