@@ -159,6 +159,23 @@ pub struct ScanParams {
     pub exclude: Vec<String>,
 }
 
+/// Every address of the scan URL's host, for the scanner's workers to
+/// spread over: the same discovery the copy uses
+/// ([`crate::endpoint::resolve_host`]). Empty, which leaves the search
+/// to the walker, for a URL with an explicit port or a name whose
+/// addresses cannot be listed.
+fn scan_addresses(scan_url: &str) -> Vec<String> {
+    let Ok(url) = crate::endpoint::parse("scan URL", scan_url) else {
+        return Vec::new();
+    };
+    if url.port.is_some() {
+        return Vec::new();
+    }
+    crate::endpoint::resolve_host(&url.host)
+        .map(|set| set.iter().map(ToString::to_string).collect())
+        .unwrap_or_default()
+}
+
 /// Version label of the compiled-in scanner, recorded in the scan
 /// checkpoint and stamped into each canonical shard's KV metadata.
 pub fn embedded_walker_version() -> String {
@@ -203,10 +220,15 @@ pub async fn ensure_scan(wd: &WorkDir, params: &ScanParams) -> Result<ScanCheckp
         workers: params.workers,
         exclude: Vec::new(),
         exclude_dirs: params.exclude.clone(),
+        server_ips: scan_addresses(&params.scan_url),
         log: attempt_dir.join("walker-progress.jsonl"),
     };
+    let over = match invocation.server_ips.len() {
+        0 | 1 => String::new(),
+        n => format!(" over {n} addresses"),
+    };
     println!(
-        "  scanning {} ({} workers)",
+        "  scanning {} ({} workers{over})",
         params.scan_url, invocation.workers,
     );
     let walker_version = embedded_walker_version();
@@ -415,9 +437,11 @@ mod tests {
             workers: 8,
             exclude: Vec::new(),
             exclude_dirs: vec![".snapshot".into(), "tmp".into()],
+            server_ips: vec!["172.200.204.1".into(), "172.200.204.2".into()],
             log: "/w/scan/attempt-0001/walker-progress.jsonl".into(),
         };
         let cli = walker_cli(&invocation).expect("embedded CLI accepts prepare's arguments");
+        assert_eq!(cli.server_ips, ["172.200.204.1", "172.200.204.2"]);
         assert_eq!(cli.nfs_url.as_deref(), Some("nfs://h/export/data"));
         assert_eq!(cli.workers, 8);
         assert_eq!(
@@ -459,6 +483,7 @@ mod tests {
             workers: 1,
             exclude: Vec::new(),
             exclude_dirs: vec!["[".into()],
+            server_ips: Vec::new(),
             log: dir.path().join("log.jsonl"),
         };
         let cli = walker_cli(&invocation).unwrap();

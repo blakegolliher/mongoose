@@ -107,6 +107,10 @@ pub struct WalkerInvocation {
     /// `--exclude-dir GLOB`: matched against a directory's name; the
     /// directory and its subtree are skipped (mongoose's `--exclude`).
     pub exclude_dirs: Vec<String>,
+    /// `--server-ips`: every address of the scan server, for the
+    /// walker's workers to spread over. Empty leaves discovery to the
+    /// walker.
+    pub server_ips: Vec<String>,
     /// The walker sizes its own part files (512 MiB built in, as of
     /// nfs-walker 0.2.0; the old `--parquet-file-size-mb` flag is gone).
     pub log: PathBuf,
@@ -133,6 +137,10 @@ impl WalkerInvocation {
             args.push("--exclude-dir".into());
             args.push(glob.clone().into());
         }
+        if !self.server_ips.is_empty() {
+            args.push("--server-ips".into());
+            args.push(self.server_ips.join(",").into());
+        }
         args
     }
 
@@ -146,6 +154,7 @@ impl WalkerInvocation {
             "--log-fmt",
             "--exclude",
             "--exclude-dir",
+            "--server-ips",
         ]
     }
 }
@@ -374,6 +383,7 @@ mod tests {
             workers: 8,
             exclude: vec![r"/\.Trash(/|$)".into()],
             exclude_dirs: vec![".snapshot".into(), "tmp".into()],
+            server_ips: Vec::new(),
             log: "/w/scan/attempt-0001/walker.jsonl".into(),
         };
         let args: Vec<String> = inv
@@ -438,6 +448,28 @@ mod tests {
         assert!(other.contains(&lock.source_git_ref), "{other}");
     }
 
+    #[test]
+    fn server_ips_are_passed_as_one_comma_separated_flag() {
+        let inv = WalkerInvocation {
+            scan_url: "nfs://h/export".into(),
+            output: "/w/walk.parquet".into(),
+            workers: 4,
+            exclude: Vec::new(),
+            exclude_dirs: Vec::new(),
+            server_ips: vec!["172.200.204.1".into(), "172.200.204.2".into()],
+            log: "/w/log".into(),
+        };
+        let args: Vec<String> = inv
+            .args()
+            .into_iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            &args[args.len() - 2..],
+            ["--server-ips", "172.200.204.1,172.200.204.2"]
+        );
+    }
+
     /// Every long flag `args()` can emit is in `long_flags()`, so the
     /// probe cannot silently fall behind the invocation.
     #[test]
@@ -448,6 +480,7 @@ mod tests {
             workers: 1,
             exclude: vec!["x".into()],
             exclude_dirs: vec!["y".into()],
+            server_ips: vec!["10.0.0.1".into(), "10.0.0.2".into()],
             log: "/w/log".into(),
         };
         for arg in inv.args() {
@@ -490,7 +523,7 @@ Options:
         );
         assert_eq!(
             missing_flags(help, WalkerInvocation::long_flags()),
-            vec!["--log", "--exclude-dir"]
+            vec!["--log", "--exclude-dir", "--server-ips"]
         );
         assert!(missing_flags(help, &["--output", "--exclude"]).is_empty());
     }

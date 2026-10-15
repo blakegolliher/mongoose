@@ -351,7 +351,20 @@ impl NfsContext {
     /// default untouched. The parameter is non-optional by design:
     /// no creation point may forget the decision.
     pub fn mount_url(url: &str, rpc_timeout_ms: u32) -> anyhow::Result<Self> {
-        let (server, export) = parse_nfs_url(url)?;
+        Self::mount_url_via(url, None, rpc_timeout_ms)
+    }
+
+    /// [`Self::mount_url`], connecting to `server` instead of the URL's
+    /// host when one is given: one address of a server reachable under
+    /// several, such as a VAST cluster's virtual IPs behind round-robin
+    /// DNS. The export and every other part of the URL are unchanged.
+    pub fn mount_url_via(
+        url: &str,
+        server: Option<&str>,
+        rpc_timeout_ms: u32,
+    ) -> anyhow::Result<Self> {
+        let (url_server, export) = parse_nfs_url(url)?;
+        let server = server.map_or(url_server, str::to_string);
         let raw = unsafe { nfs_init_context() };
         if raw.is_null() {
             anyhow::bail!("nfs_init_context returned null for {url}");

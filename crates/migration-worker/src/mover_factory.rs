@@ -22,6 +22,12 @@ use std::sync::Arc;
 pub struct MoverParams {
     pub source_url: String,
     pub dest_url: String,
+    /// Addresses to spread the source connections over: pair `i`
+    /// connects to entry `i % len` (see `MultiPool::build_spread`).
+    /// Empty connects by the URL's host name.
+    pub source_targets: Vec<String>,
+    /// The same, for the destination.
+    pub dest_targets: Vec<String>,
     pub source_root: String,
     pub dest_root: String,
     pub options: MigrationOptions,
@@ -52,6 +58,9 @@ pub struct MoverParams {
 pub struct BuiltMover {
     pub mover: Arc<dyn FileMover>,
     pub pool: Arc<dyn LibnfsContextPool>,
+    /// The (source, destination) address each sync-pool pair connected
+    /// to; `None` is the URL's host name. For the operator's log.
+    pub connections: Vec<(Option<String>, Option<String>)>,
 }
 
 /// Project [`MoverParams`] onto a [`MoverConfig`]. Pure; split out so
@@ -101,18 +110,24 @@ pub async fn build(
     let requested = params.nfs_connections.max(1);
     migration_core::latency::set_pairs(requested as u32);
     let pool_size = sync_pool_size(params.nfs_connections, params.use_bucketed_pool);
-    let pool: Arc<dyn LibnfsContextPool> = MultiPool::build(
+    let multi = MultiPool::build_spread(
         &params.source_url,
         &params.dest_url,
+        &params.source_targets,
+        &params.dest_targets,
         pool_size,
         // F12: explicit per-RPC timeout at every context creation;
         // 0 = leave the libnfs default untouched.
         params.rpc_timeout_ms,
     )?;
+    let connections = multi.targets().to_vec();
+    let pool: Arc<dyn LibnfsContextPool> = multi;
     tracing::info!(
         pool_size,
         src = %params.source_url,
         dst = %params.dest_url,
+        src_addresses = params.source_targets.len(),
+        dst_addresses = params.dest_targets.len(),
         "libnfs pool mounted",
     );
 
@@ -157,7 +172,11 @@ pub async fn build(
             fence,
         ))
     };
-    Ok(BuiltMover { mover, pool })
+    Ok(BuiltMover {
+        mover,
+        pool,
+        connections,
+    })
 }
 
 #[cfg(test)]
@@ -168,6 +187,8 @@ mod tests {
         MoverParams {
             source_url: "nfs://src/export".into(),
             dest_url: "nfs://dst/export".into(),
+            source_targets: vec!["10.0.0.1".into(), "10.0.0.2".into()],
+            dest_targets: Vec::new(),
             source_root: "/data".into(),
             dest_root: "/copy".into(),
             options: MigrationOptions::default(),

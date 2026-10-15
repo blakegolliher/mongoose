@@ -132,10 +132,15 @@ pub fn mover_params(
     require_chown: bool,
     host_id: String,
     same_server: bool,
+    targets: &endpoint::ConnectionTargets,
 ) -> MoverParams {
     MoverParams {
         source_url: m.source.url.clone(),
         dest_url: m.dest.url.clone(),
+        // Every address of each server, so the connection pairs spread
+        // over all of a round-robin cluster's addresses.
+        source_targets: targets.src.clone(),
+        dest_targets: targets.dst.clone(),
         source_root: m.source.root.clone(),
         dest_root: m.dest.root.clone(),
         options: m.options.clone(),
@@ -248,8 +253,20 @@ pub(crate) async fn run_manifest_with_stop(
     let fence = Fence::new();
     let downgrades = DowngradeSink::new();
     let failures = FailureSink::new();
-    let params = mover_params(&m, tuning, cap_chown, host_id, names.may_be_same_server());
+    let targets = endpoint::connection_targets(&src_url, &dst_url, &names);
+    let params = mover_params(
+        &m,
+        tuning,
+        cap_chown,
+        host_id,
+        names.may_be_same_server(),
+        &targets,
+    );
     let built = mover_factory::build(&params, downgrades.clone(), fence.clone()).await?;
+    println!(
+        "  connections: {}",
+        endpoint::describe_pool(&built.connections)
+    );
     let separation = identity::prove_separation(
         &built.pool,
         &src_url,
@@ -540,7 +557,20 @@ mod tests {
 
     #[test]
     fn mover_params_project_manifest_and_tuning() {
-        let p = mover_params(&local_manifest(), &tuning(), true, "h".into(), true);
+        let targets = endpoint::ConnectionTargets {
+            src: vec!["10.0.0.1".into(), "10.0.0.2".into()],
+            dst: vec!["10.9.0.1".into()],
+        };
+        let p = mover_params(
+            &local_manifest(),
+            &tuning(),
+            true,
+            "h".into(),
+            true,
+            &targets,
+        );
+        assert_eq!(p.source_targets, ["10.0.0.1", "10.0.0.2"]);
+        assert_eq!(p.dest_targets, ["10.9.0.1"]);
         assert!(
             p.same_server,
             "the identity verdict arms the per-file check"

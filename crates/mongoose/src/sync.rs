@@ -476,12 +476,14 @@ async fn cutover_verify(
     scan::purge_scan_output(&dest_wd);
 
     println!("[5/{steps}] verify the destination against the source");
+    let (src_url, dst_url, names) = endpoints;
     let checker = LibnfsChecker::mount(
         &root.source.url,
         &root.dest.url,
         &root.source.root,
         &root.dest.root,
         tuning.parallel.max(1) as usize,
+        &endpoint::connection_targets(src_url, dst_url, names),
     )?;
     let source_shards: Vec<PathBuf> = full
         .shards
@@ -494,7 +496,6 @@ async fn cutover_verify(
     for shard in &dest_index.shards {
         manifest::verify_shard_integrity(&dest_wd, shard)?;
     }
-    let (src_url, dst_url, names) = endpoints;
     let separation =
         identity::prove_separation(&checker.pool(), src_url, dst_url, names, &source_shards)
             .await?;
