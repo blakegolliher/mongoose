@@ -2472,7 +2472,7 @@ dependencies = [
 [[package]]
 name = "nfs-walker"
 version = "0.2.0"
-source = "git+https://github.com/blakegolliher/nfs-walker?rev=4dcaee499f6301673f97ad57c1d0e165a08cf29a#4dcaee499f6301673f97ad57c1d0e165a08cf29a"
+source = "git+https://github.com/blakegolliher/nfs-walker?rev=f6f75725d8014a3c3bd943f5dd3650aef54a9cd7#f6f75725d8014a3c3bd943f5dd3650aef54a9cd7"
 dependencies = [
  "anyhow",
  "arrow",
