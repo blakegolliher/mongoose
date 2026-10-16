@@ -104,12 +104,19 @@ destination, or the source, and run `--cutover` again.
   unreachable server, not root) or, for `--cutover`, that the trees
   do not match. 2 means it finished but some files failed; the list is
   under `<work-dir>/failures/`, and the next `sync` retries them.
-- **What is copied**: file contents, directories, symlinks,
-  hardlinks, owner, mode, and file timestamps. For ownership to carry
-  over, the destination export has to let root in (`no_root_squash`),
-  and the source export has to let root read everything. Directory
-  timestamps are restored on a best-effort basis and are not part of
-  what `--cutover` checks.
+- **What is copied**: file contents, directories, symlinks, owner,
+  mode, and file timestamps. For ownership to carry over, the
+  destination export has to let root in (`no_root_squash`), and the
+  source export has to let root read everything. Directory timestamps
+  are restored on a best-effort basis and are not part of what
+  `--cutover` checks.
+- **Hardlinks are usually copied as separate files.** Two names of one
+  file become a hardlink on the new server only if they land in the
+  same part of the copy, which is picked by a hash of the path, about
+  one time in 32. Every other name is copied in full, so a tree with
+  many hardlinks (backups, for example) takes more space on the new
+  server than on the old one. `--cutover` checks the bytes at every
+  path, not the sharing.
 - **Every address of a server is used.** If the server's name is
   round-robin DNS (a VAST cluster's virtual IPs), the connections are
   spread evenly over all of its addresses. The `connections:` line

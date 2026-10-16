@@ -214,9 +214,9 @@ cutover. Directories that disappear during a scan of a live source are
 recorded as vanished and are not errors.
 .PP
 Cutover verification does not check directory mtimes (a later commit
-into a directory bumps it), atimes, hardlink sharing (links that span
-shards copy as separate files), or a symlink's own mode, owner, and
-times (NFSv3 cannot set them). Fifos, sockets, and device nodes are not
+into a directory bumps it), atimes, hardlink sharing (most names of a
+hardlinked file are copied as separate files), or a symlink's own mode,
+owner, and times (NFSv3 cannot set them). Fifos, sockets, and device nodes are not
 copied and are reported. See docs/REFERENCE.md in the project for the
 full correctness posture and limitations.
 .SH AUTHOR
