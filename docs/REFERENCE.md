@@ -133,8 +133,12 @@ pruned; delete them by hand once their reports are no longer needed.
 - Owner, mode, and times are preserved. A source attribute the
   destination will not accept (for example chown without root on the
   destination) is recorded as a downgrade, not a failure.
-- Hardlink groups copy sequentially within a shard micro-batch; the
-  first row is fully published before the rest link to it.
+- Names of one file (the same `(fsid, inode)`, `nlink > 1`) that fall
+  in the same shard micro-batch (at most 100,000 entries or 8 GiB) form
+  a hardlink group: the first is copied and fully published, then the
+  rest are linked to it. Shards are picked by a hash of the path, so
+  most names of a hardlinked file land in other shards and are copied
+  as separate files; see [Limitations](#limitations-deliberate).
 - Failures and downgrades are separate JSONL streams, written after
   every shard.
 - A fifo, socket, or device node is recognized and **not copied**.
@@ -306,8 +310,9 @@ guarantee them:
 - directory mtimes (any later commit into a directory bumps it; the
   final restamp is best-effort);
 - atimes;
-- hardlink topology (links that span shards copy as separate files;
-  the bytes at each path are still verified);
+- hardlink topology (names in different shards, micro-batches, or sync
+  passes copy as separate files; the bytes at each path are still
+  verified);
 - a symlink's own mode, owner, and times (NFSv3 has no lchmod, and
   lutimes is best-effort);
 - the migration root's own attributes (the walker emits no row for
@@ -339,9 +344,15 @@ is not detected.
 - Deletions are recorded (`classify/deleted.jsonl`) but never
   propagated to the destination. Renames therefore copy as
   delete+create.
-- Hardlink fidelity is shard-scoped: links that span shards copy as
-  separate files. Cutover verifies the bytes at every path, not the
-  sharing.
+- Hardlinks are kept only within one shard micro-batch of one pass.
+  The scan puts each path in one of the walker's 32 writer shards by a
+  hash of the path, so two names of one file share a shard about one
+  time in 32; a name added by a later `sync` is always copied alone.
+  Every other name is copied in full, so a tree with many hardlinks
+  needs more space on the destination than on the source. A
+  hardlinked row with no `fsid` is never grouped (one `FSID_UNGROUPED`
+  downgrade per shard). Cutover verifies the bytes at every path, not
+  the sharing.
 - A directory whose children land in a different shard can end with a
   bumped mtime; the migration root itself is re-stamped at the end of
   a complete run. Directory mtimes are outside the cutover contract.
