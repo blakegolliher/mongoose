@@ -721,8 +721,13 @@ real-NFS qualification. Its hardlink-safety merge prerequisite was resolved on
 2026-09-30 (nfs-walker PR #15, mongoose PR #17).
 
 Status (2026-09-30): implemented in software (nfs-walker PR #18 and the
-mongoose change that pins it). Its real-NFS qualification has not been run and
-remains a release blocker.
+mongoose change that pins it).
+
+Status (2026-10-16): the real-NFS procedure passed on var204 for FIFOs and
+sockets with a local build of `main` `63301e6`
+(`docs/qualification/2026-10-16-var204-special-files.md`). Device nodes were
+not tested, and the server refused non-UTF-8 names. The release must repeat
+the procedure with the attested binary under 11C-4.
 
 ## Production release exit criteria
 
