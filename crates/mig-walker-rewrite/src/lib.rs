@@ -558,6 +558,11 @@ fn dir_has_parquet(dir: &Path) -> Result<bool> {
 // Shard-level driver
 // =============================================================================
 
+/// Encoded column data a canonical shard's writer buffers before it
+/// closes a row group. Without a limit the writer holds up to parquet's
+/// default 1,048,576 rows of a group in memory.
+const ROW_GROUP_BYTES: usize = 32 * 1024 * 1024;
+
 /// Rewrite one walker shard into one canonical shard. Returns the row
 /// count that was written.
 fn rewrite_shard(
@@ -567,11 +572,36 @@ fn rewrite_shard(
     source_root: &[u8],
     walker_version: &str,
 ) -> Result<u64> {
+    rewrite_shard_with(
+        input,
+        output,
+        shard_idx,
+        source_root,
+        walker_version,
+        ROW_GROUP_BYTES,
+    )
+}
+
+/// [`rewrite_shard`] with its row-group byte limit as a parameter.
+///
+/// Each translated batch goes straight to the writer, and a row group
+/// closes once its encoded data reaches `row_group_bytes`, so memory
+/// stays at about one input batch plus one row group however many rows
+/// the walker part holds. The writer opens on the first non-empty
+/// batch, whose schema is the output schema; the row count, known only
+/// at the end, goes into the footer when the writer closes.
+fn rewrite_shard_with(
+    input: &Path,
+    output: &Path,
+    shard_idx: u32,
+    source_root: &[u8],
+    walker_version: &str,
+    row_group_bytes: usize,
+) -> Result<u64> {
     let file = File::open(input).with_context(|| format!("opening {}", input.display()))?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
 
-    let mut output_batches: Vec<RecordBatch> = Vec::new();
-    let mut output_schema: Option<Arc<ArrowSchema>> = None;
+    let mut writer: Option<ArrowWriter<File>> = None;
     let mut row_offset_in_shard: u64 = 0;
 
     for batch in reader {
@@ -581,59 +611,28 @@ fn rewrite_shard(
         }
         let translated = translate_batch(&batch, shard_idx, row_offset_in_shard, source_root)?;
         row_offset_in_shard += batch.num_rows() as u64;
-        output_schema.get_or_insert_with(|| translated.schema());
-        output_batches.push(translated);
+        let w = match writer.as_mut() {
+            Some(w) => w,
+            None => writer.insert(open_shard_writer(output, translated.schema())?),
+        };
+        w.write(&translated)?;
+        if w.in_progress_size() >= row_group_bytes {
+            w.flush()?;
+        }
     }
 
     // If the input was empty we still emit an empty canonical shard so
     // the downstream view is consistent with the input shard set.
-    let schema = match output_schema {
-        Some(s) => s,
-        None => Arc::new(canonical_plus_legacy_schema(&[])),
+    let writer = match writer {
+        Some(w) => w,
+        None => open_shard_writer(output, Arc::new(canonical_plus_legacy_schema(&[])))?,
     };
-
-    write_shard(
-        output,
-        schema,
-        &output_batches,
-        shard_idx,
-        walker_version,
-        row_offset_in_shard,
-    )?;
+    close_shard(writer, shard_idx, walker_version, row_offset_in_shard)?;
 
     Ok(row_offset_in_shard)
 }
 
-fn write_shard(
-    output: &Path,
-    schema: Arc<ArrowSchema>,
-    batches: &[RecordBatch],
-    shard_idx: u32,
-    walker_version: &str,
-    row_count: u64,
-) -> Result<()> {
-    let kv = vec![
-        KeyValue {
-            key: KV_FORMAT_VERSION.into(),
-            value: Some(schema::FORMAT_VERSION.to_string()),
-        },
-        KeyValue {
-            key: KV_CONTRACT_VERSION.into(),
-            value: Some(schema::CONTRACT_VERSION.to_string()),
-        },
-        KeyValue {
-            key: KV_SHARD_INDEX.into(),
-            value: Some(shard_idx.to_string()),
-        },
-        KeyValue {
-            key: KV_WALKER_VERSION.into(),
-            value: Some(walker_version.to_string()),
-        },
-        KeyValue {
-            key: KV_ROW_COUNT.into(),
-            value: Some(row_count.to_string()),
-        },
-    ];
+fn open_shard_writer(output: &Path, schema: Arc<ArrowSchema>) -> Result<ArrowWriter<File>> {
     // ZSTD like the walker's own output. The builder default is
     // UNCOMPRESSED, which made the 600M index 241 GB in S3 (~400 B per
     // row against the walker's ~68) — every worker downloads a shard
@@ -641,13 +640,29 @@ fn write_shard(
     // disk until it is uploaded.
     let props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::default()))
-        .set_key_value_metadata(Some(kv))
         .build();
-
     let file = File::create(output).with_context(|| format!("creating {}", output.display()))?;
-    let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
-    for batch in batches {
-        writer.write(batch)?;
+    Ok(ArrowWriter::try_new(file, schema, Some(props))?)
+}
+
+/// Stamp the shard's identity and row count into the footer and close.
+fn close_shard(
+    mut writer: ArrowWriter<File>,
+    shard_idx: u32,
+    walker_version: &str,
+    row_count: u64,
+) -> Result<()> {
+    for (key, value) in [
+        (KV_FORMAT_VERSION, schema::FORMAT_VERSION.to_string()),
+        (KV_CONTRACT_VERSION, schema::CONTRACT_VERSION.to_string()),
+        (KV_SHARD_INDEX, shard_idx.to_string()),
+        (KV_WALKER_VERSION, walker_version.to_string()),
+        (KV_ROW_COUNT, row_count.to_string()),
+    ] {
+        writer.append_key_value_metadata(KeyValue {
+            key: key.into(),
+            value: Some(value),
+        });
     }
     writer.close()?;
     Ok(())
@@ -1997,6 +2012,65 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    /// The rewrite streams: a walker part read in many batches is written
+    /// batch by batch, and a row group closes once its encoded data
+    /// reaches the byte limit. A tiny limit and the default give the same
+    /// rows, row ids and footer row count; only the grouping differs.
+    #[test]
+    fn rewrite_streams_batches_and_closes_row_groups_at_the_byte_limit() {
+        use parquet::file::reader::{FileReader, SerializedFileReader};
+
+        let dir = tempdir("rewrite-streams");
+        let paths: Vec<Vec<u8>> = (0..5_000)
+            .map(|i| format!("/src/d{}/f{i}", i % 37).into_bytes())
+            .collect();
+        let rows: Vec<(&[u8], Option<&str>, u16)> = paths
+            .iter()
+            .map(|p| (p.as_slice(), Some("file"), 0o644))
+            .collect();
+        let input = dir.join("in");
+        write_walker_shard(&input, "part-r00-00000.parquet", &walker_batch_of(&rows));
+        let in_path = input.join("part-r00-00000.parquet");
+
+        let whole = dir.join("whole.parquet");
+        let small = dir.join("small.parquet");
+        assert_eq!(
+            rewrite_shard(&in_path, &whole, 0, b"/src", "test").unwrap(),
+            5_000
+        );
+        assert_eq!(
+            rewrite_shard_with(&in_path, &small, 0, b"/src", "test", 16 * 1024).unwrap(),
+            5_000
+        );
+
+        let groups = |p: &Path| {
+            SerializedFileReader::new(File::open(p).unwrap())
+                .unwrap()
+                .metadata()
+                .num_row_groups()
+        };
+        assert_eq!(
+            groups(&whole),
+            1,
+            "5,000 rows stay under the 32 MiB default"
+        );
+        assert!(groups(&small) > 1, "a 16 KiB limit closes many row groups");
+
+        for shard in [&whole, &small] {
+            let reader = migration_core::shard::ShardReader::open(shard).unwrap();
+            assert_eq!(reader.rows(), 5_000, "footer row count");
+        }
+        let ids = |p: &Path| -> Vec<(u64, Vec<u8>)> {
+            read_rows(p)
+                .into_iter()
+                .map(|r| (r.row_id, r.path))
+                .collect()
+        };
+        let whole_ids = ids(&whole);
+        assert_eq!(whole_ids.len(), 5_000);
+        assert_eq!(whole_ids, ids(&small));
     }
 
     /// Every type the walker emits reaches the canonical shard with its
