@@ -6,8 +6,8 @@ with the number of entries is to be streamed, spilled to disk, or capped by a
 budget, with correct behavior when something is evicted.
 
 **Status (2026-10-16):** the walker scan is bounded (nfs-walker `f6f7572`,
-mongoose PR #26). Step 1 is closed with no change, step 2 merged (PR #31),
-and step 3 is in this change. Steps 4 to 6 are open.
+mongoose PR #26). Step 1 is closed with no change, steps 2 and 3 merged
+(PRs #31 and #32), and step 4 is in this change. Steps 5 to 8 are open.
 
 ## What grows with tree size
 
@@ -81,10 +81,35 @@ Fixed but large: each copy micro-batch spawns all of its rows at once, at
 
    Both versions gave identical counts. A split costs one extra write and
    read of the bucket files.
-4. **Directory caches.** Cap them by bytes. A miss repeats a LOOKUP or an
-   mkdir, which is correct and only slower. This needs a directory-heavy
-   test tree on real NFS to measure the hit rate (fs-sim-1 has 4,764
-   directories).
+4. **Directory caches.** `dirs_known` and the source and destination
+   directory filehandle caches are now two-generation maps
+   (`migration-mover/src/generational.rs`): inserts go to the current
+   generation, a hit in the previous one moves forward, and a full current
+   generation replaces the previous one. Each cache keeps at most two
+   generations of 524,288 directories. A miss repeats a LOOKUP or an mkdir,
+   which is correct and only slower.
+
+   Each run copied an fs-sim tree of 1,000,000 directories and 1,000,000
+   1 KiB files on var204 into a fresh destination:
+
+   | Directories per generation | Copy phase | Peak RSS |
+   |---|---|---|
+   | unbounded (before) | 1,250 s | 1,118 MB |
+   | 4,096 | 1,933 s | 876 MB |
+   | 131,072 | 1,361 s | 959 MB |
+   | 524,288 (chosen) | 1,299 s | 1,101 MB |
+
+   - **Per-directory cost:** the three caches cost about 270 B per
+     directory, so unbounded they grow about 13 GB per 50M directories.
+     At the chosen size they stop at about 280 MB.
+   - **Why the chosen size behaves like unbounded here:** this tree's 1M
+     directories fit in its two generations.
+   - **Cost of misses:** each directory is touched twice in different
+     shards, once as its file's parent and once for its own row, so a
+     cache too small to hold the tree pays a LOOKUP per side.
+
+   The directory-heavy tree also showed two more consumers that grow with
+   directories (steps 6 and 7).
 5. **Smaller items:**
    - a bounded reorder window for the content read-back;
    - re-reading directory rows from the shard file at re-stamp time instead
@@ -92,9 +117,19 @@ Fixed but large: each copy micro-batch spawns all of its rows at once, at
    - filtering records while reading them in the pending-set load;
    - writing the failure and downgrade logs incrementally;
    - spawning micro-batch rows lazily.
-6. **Regression guard.** A test pushes a synthetic index of several million
+6. **The walker's pending-directory queue** (nfs-walker, then a pin bump).
+   The walker's work-stealing deques are FIFO, so the scan is
+   breadth-first, and on a wide tree most of a level waits in the queue at
+   once. The 1M-directory scan peaked at about 710 MB, against about
+   600 MB for 2M files in 4,764 directories. LIFO local deques (depth-first
+   per worker, steals still taking the oldest work) should keep it near
+   depth × fan-out per worker. This needs measuring.
+7. **The READDIRPLUS child cache's evicted set** (`DirChildrenState`): it
+   is capped at 1,000,000 paths, about 45 MB on this tree and up to about
+   150 MB.
+8. **Regression guard.** A test pushes a synthetic index of several million
    rows through rewrite, classify and namespace verification, and fails if
    peak memory crosses a fixed ceiling. It needs no NFS.
 
-The target after steps 1–6 is about 1–1.5 GB peak for any tree size. That is
-an estimate, to be confirmed by the step 6 measurements.
+The target after steps 1–8 is about 1–1.5 GB peak for any tree size. That is
+an estimate, to be confirmed by the step 8 measurements.
