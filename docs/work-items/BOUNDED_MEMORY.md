@@ -132,6 +132,11 @@ Fixed but large: each copy micro-batch spawns all of its rows at once, at
    | 1M directories, 1M files | 727–749 MB, 33–34 s | 625–675 MB, 28–34 s |
    | 2M files in 4,764 directories | 718–726 MB, 8.1 s | 710–744 MB, 8.1–8.2 s |
 
+   In mongoose, a no-op `sync` of the 2M-file tree with this walker peaked
+   at 640 MB, against 636 MB with the previous pin. It classified all
+   2,004,879 entries unchanged against a baseline the breadth-first walker
+   wrote.
+
    One directory with millions of subdirectories still queues all of them
    when it is read.
 7. **The READDIRPLUS child cache's evicted set** (`DirChildrenState`): it
