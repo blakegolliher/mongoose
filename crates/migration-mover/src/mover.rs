@@ -39,6 +39,7 @@ use crate::attrs::{self, AttrPolicy};
 use crate::batch::InflightProfile;
 use crate::downgrade::DowngradeSink;
 use crate::error::MoveError;
+use crate::generational::Generational;
 use crate::libnfs::raw::{self, RawSattr};
 use crate::libnfs::{nfs_stat_64, ops, ContextPair, LibnfsContextPool, NfsContext};
 use crate::paths::{join_root, partial_path};
@@ -69,6 +70,16 @@ const DIR_CHILDREN_CACHE_FH_CAPACITY: usize = 1_000_000;
 /// Disabled sentinels have no child filehandles, so retain a separate directory
 /// bound to keep failed/oversized prefetches from accumulating indefinitely.
 const DIR_CHILDREN_CACHE_DIR_CAPACITY: usize = 4_096;
+/// Directories each directory cache (`dirs_known` and the source and
+/// destination filehandle caches) keeps per generation; it holds at most
+/// two generations (see [`Generational`]). The three caches together
+/// cost about 270 bytes per directory (measured), so they stay under
+/// about 280 MB however many directories the tree has, and a tree of up
+/// to about a million directories never evicts. A forgotten directory
+/// costs one more LOOKUP or MKDIR when it is next needed: on a
+/// 1M-directory tree a quarter of this size made the copy 9% slower,
+/// and 1/128 of it 55%.
+const DIR_CACHE_GENERATION: usize = 524_288;
 /// Bound on the evicted-dirs set (see `DirChildrenState::evicted`).
 /// ~60 bytes per remembered path: full at ~60 MB.
 const DIR_CHILDREN_EVICTED_CAP: usize = 1_000_000;
@@ -297,8 +308,9 @@ pub struct Mover {
     /// run, so a hit can never mask a missing directory. Guards the
     /// per-file ancestor mkdir probes, which otherwise dominate the RPC
     /// budget on small-file trees (measured ~7 EEXIST round-trips per
-    /// file on a depth-8 tree).
-    dirs_known: Arc<std::sync::Mutex<std::collections::HashSet<Vec<u8>>>>,
+    /// file on a depth-8 tree). Bounded (see [`DIR_CACHE_GENERATION`]):
+    /// an evicted directory is only a miss, which runs `mkdir_p` again.
+    dirs_known: Arc<std::sync::Mutex<Generational<Vec<u8>, ()>>>,
     /// Single-flight guards per directory currently being created.
     /// Without this the cache misses under fan-out: every file of a
     /// directory is already in flight before the first `mkdir_p`
@@ -324,10 +336,18 @@ pub struct Mover {
 /// Path → directory-filehandle cache with per-path single-flight, so a
 /// burst of files landing in one new directory costs one LOOKUP/MKDIR
 /// chain, not one per in-flight file.
-#[derive(Default)]
 struct FhCache {
-    map: std::sync::Mutex<std::collections::HashMap<Vec<u8>, Arc<Vec<u8>>>>,
+    map: std::sync::Mutex<Generational<Vec<u8>, Arc<Vec<u8>>>>,
     locks: std::sync::Mutex<std::collections::HashMap<Vec<u8>, Arc<std::sync::Mutex<()>>>>,
+}
+
+impl Default for FhCache {
+    fn default() -> Self {
+        Self {
+            map: std::sync::Mutex::new(Generational::new(DIR_CACHE_GENERATION)),
+            locks: Default::default(),
+        }
+    }
 }
 
 type ChildFhs = std::collections::HashMap<Vec<u8>, Arc<Vec<u8>>>;
@@ -528,7 +548,9 @@ impl Mover {
             fence,
             src_export,
             dst_export,
-            dirs_known: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            dirs_known: Arc::new(std::sync::Mutex::new(Generational::new(
+                DIR_CACHE_GENERATION,
+            ))),
             dir_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             src_dir_fhs: Arc::new(FhCache::default()),
             dst_dir_fhs: Arc::new(FhCache::default()),
@@ -636,7 +658,7 @@ impl Mover {
             return Ok(Arc::new(raw::root_fh(ctx)?));
         }
         if let Some(fh) = cache.map.lock().unwrap().get(dir_path) {
-            return Ok(Arc::clone(fh));
+            return Ok(fh);
         }
         let mut cur: Arc<Vec<u8>> = Arc::new(raw::root_fh(ctx)?);
         let mut acc: Vec<u8> = Vec::with_capacity(dir_path.len());
@@ -647,7 +669,7 @@ impl Mover {
             acc.push(b'/');
             acc.extend_from_slice(comp);
             if let Some(fh) = cache.map.lock().unwrap().get(acc.as_slice()) {
-                cur = Arc::clone(fh);
+                cur = fh;
                 continue;
             }
             let flight = {
@@ -660,7 +682,7 @@ impl Mover {
             };
             let _g = flight.lock().unwrap();
             if let Some(fh) = cache.map.lock().unwrap().get(acc.as_slice()) {
-                cur = Arc::clone(fh);
+                cur = fh;
                 continue;
             }
             let fh = match raw::lookup(ctx, &cur, comp) {
@@ -704,7 +726,7 @@ impl Mover {
     /// then records `path` plus every ancestor, so sibling subtrees skip
     /// the shared prefix entirely.
     fn ensure_dir(&self, ctx: &mut NfsContext, path: &[u8]) -> Result<(), MoveError> {
-        if self.dirs_known.lock().unwrap().contains(path) {
+        if self.dirs_known.lock().unwrap().get(path).is_some() {
             return Ok(());
         }
         // Single-flight: exactly one task per directory runs the real
@@ -719,7 +741,7 @@ impl Mover {
             )
         };
         let _flight = dir_lock.lock().unwrap();
-        if self.dirs_known.lock().unwrap().contains(path) {
+        if self.dirs_known.lock().unwrap().get(path).is_some() {
             return Ok(());
         }
         ops::mkdir_p(ctx, path)?;
@@ -727,7 +749,7 @@ impl Mover {
             let mut known = self.dirs_known.lock().unwrap();
             let mut end = path.len();
             loop {
-                known.insert(path[..end].to_vec());
+                known.insert(path[..end].to_vec(), ());
                 match path[..end].iter().rposition(|&b| b == b'/') {
                     Some(i) if i > 0 => end = i,
                     _ => break,

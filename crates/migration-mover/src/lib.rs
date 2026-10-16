@@ -26,6 +26,7 @@ pub mod downgrade;
 pub mod error;
 pub mod failure;
 pub mod file_mover;
+mod generational;
 pub mod libnfs;
 mod mover;
 pub mod paths;
