@@ -1,11 +1,19 @@
 # Special-file and type-safety implementation handoff
 
-Status: **implemented in software on 2026-09-30; real-NFS qualification is
-still outstanding and remains a release blocker.** The walker half is
+Status: **implemented in software on 2026-09-30.** The walker half is
 nfs-walker PR #18 (commit `4dcaee499f6301673f97ad57c1d0e165a08cf29a`); the
-mongoose half is the change that carries this status line, which pins that
-walker commit. Neither has run against a real NFS server: see "Real-NFS
-qualification" below.
+mongoose half is the change that pinned that walker commit.
+
+**Qualified on real NFS on 2026-10-16** for FIFOs and sockets: var204, a local
+build of `main` `63301e6`. The record is
+`docs/qualification/2026-10-16-var204-special-files.md`.
+- Device nodes were not tested.
+- The server refused non-UTF-8 names, so the synthetic tests are their only
+  coverage.
+- The release qualification (11C-4) must repeat the procedure with the
+  attested release binary.
+
+See "Real-NFS qualification" below.
 
 The hardlink prerequisite below landed on both repositories' `main` branches
 on 2026-09-30.
@@ -584,6 +592,9 @@ Preserve a qualification record containing repository commits, binary and
 walker digests, server/export identities, commands, decoded type evidence,
 counters, cutover result, and any server limitation. Hardware qualification
 must be tied to the exact release candidate; an earlier build is not enough.
+
+The 2026-10-16 run on var204, with its tools, is recorded in
+`docs/qualification/2026-10-16-var204-special-files.md`.
 
 ## Non-goals
 
