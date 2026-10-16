@@ -465,3 +465,156 @@ async fn cutover_verification_reads_the_destination_back() {
     assert_eq!(again.status, VerifyStatus::Pass);
     assert_eq!(again.content, report.content);
 }
+
+// =====================================================================
+// Trees smaller than the walker's writer-shard count
+// =====================================================================
+
+/// Write one walker part per entry of `parts`, empty ones included,
+/// as the walker does: one part per writer shard whether or not any
+/// entry hashed to it.
+fn write_walker_parts(scan: &Path, parts: &[&[WalkerRow]]) {
+    for (i, rows) in parts.iter().enumerate() {
+        write_walker_part(&scan.join(format!("part-r{i:02}-00000.parquet")), rows);
+    }
+}
+
+/// A small tree leaves some walker parts empty, and the rewrite keeps
+/// each as an empty canonical shard. The index, a resync pass, and
+/// cutover verification all take them as they are, and so does a tree
+/// with no entries at all. The index used to refuse any shard with 0
+/// rows, so `copy` of a tree of a few dozen entries failed before
+/// copying anything.
+#[tokio::test]
+async fn empty_walker_parts_are_indexed_resynced_and_verified() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = WorkDir::new(tmp.path());
+
+    // ---- Pass 0: four parts, two of them empty ----------------------
+    let scan1 = tmp.path().join("fixture-scan-1");
+    write_walker_parts(
+        &scan1,
+        &[
+            &[wrow("/a", 10, 1_000_000, 1_000_000)],
+            &[],
+            &[
+                wrow("/b", 10, 1_000_000, 1_000_000),
+                trow("/dir", "directory"),
+            ],
+            &[],
+        ],
+    );
+    let m0 = rewrite_and_build(&root, &scan1, "run-small");
+    assert_eq!(m0.shards.len(), 4, "one canonical shard per walker part");
+    assert_eq!(m0.total_rows, 3);
+    assert_eq!(m0.shards.iter().filter(|s| s.rows == 0).count(), 2);
+    let reloaded = manifest::load(&root).unwrap().expect("manifest written");
+    assert_eq!(
+        reloaded.shards, m0.shards,
+        "an index with empty shards loads back"
+    );
+
+    // ---- Pass 1: /c is new in a part that was empty, /b changed ------
+    let scan2 = tmp.path().join("fixture-scan-2");
+    write_walker_parts(
+        &scan2,
+        &[
+            &[wrow("/a", 10, 1_000_000, 1_000_000)],
+            &[wrow("/c", 10, 1_000_000, 1_000_000)],
+            &[
+                wrow("/b", 12, 2_000_000, 2_000_000),
+                trow("/dir", "directory"),
+            ],
+            &[],
+        ],
+    );
+    let pass_wd = WorkDir::new(root.pass_dir(1));
+    std::fs::create_dir_all(pass_wd.root()).unwrap();
+    let m1 = rewrite_and_build(&pass_wd, &scan2, "run-small");
+    assert_eq!(m1.total_rows, 4);
+    let shard_paths = |wd: &WorkDir, m: &manifest::LocalManifest| -> Vec<_> {
+        m.shards.iter().map(|s| wd.shard_path(&s.path)).collect()
+    };
+    let counts = migration_resync::classify(
+        &shard_paths(&root, &m0),
+        &shard_paths(&pass_wd, &m1),
+        &HashSet::new(),
+        &pass_wd.classify_dir(),
+        8,
+    )
+    .unwrap();
+    assert_eq!(counts.new, 1, "/c");
+    assert_eq!(counts.dirty_tuple, 1, "/b");
+    assert_eq!(counts.unchanged, 2, "/a /dir");
+    assert_eq!(counts.deleted, 0);
+    assert_eq!(counts.keep_rows, 2);
+    let delta = mongoose::delta::emit(&pass_wd, &m1)
+        .unwrap()
+        .expect("non-empty delta");
+    assert_eq!(delta.total_rows, 2);
+    assert_eq!(delta.shards.len(), 2, "only the parts holding /b and /c");
+    assert!(delta.shards.iter().all(|s| s.rows > 0));
+
+    // ---- Cutover: the destination's entries fall in other parts -----
+    let scan_dst = tmp.path().join("fixture-dst");
+    write_walker_parts(
+        &scan_dst,
+        &[
+            &[],
+            &[
+                wrow("/b", 12, 2_000_000, 2_000_000),
+                wrow("/c", 10, 1_000_000, 1_000_000),
+            ],
+            &[],
+            &[
+                wrow("/a", 10, 1_000_000, 1_000_000),
+                trow("/dir", "directory"),
+            ],
+            &[],
+        ],
+    );
+    let dest_wd = WorkDir::new(pass_wd.dest_dir());
+    std::fs::create_dir_all(dest_wd.root()).unwrap();
+    let m_dst = rewrite_and_build(&dest_wd, &scan_dst, "run-small");
+    assert_eq!(m_dst.shards.iter().filter(|s| s.rows == 0).count(), 3);
+    let checker = FakeChecker::default()
+        .file(b"/a", b"aaaaaaaaaa", b"aaaaaaaaaa")
+        .file(b"/b", b"bbbbbbbbbbbb", b"bbbbbbbbbbbb")
+        .file(b"/c", b"cccccccccc", b"cccccccccc");
+    let report = verify::run(
+        &pass_wd,
+        &verify_params(&pass_wd, &m1, &dest_wd, &m_dst),
+        Arc::new(checker),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.status, VerifyStatus::Pass, "{report:?}");
+    assert_eq!(report.namespace.matched, 4);
+    assert_eq!(report.content.files_read, 3);
+
+    // ---- A tree with no entries at all --------------------------------
+    let empty_wd = WorkDir::new(root.pass_dir(2));
+    std::fs::create_dir_all(empty_wd.root()).unwrap();
+    let scan_empty = tmp.path().join("fixture-empty");
+    write_walker_parts(&scan_empty, &[&[], &[], &[]]);
+    let m_empty = rewrite_and_build(&empty_wd, &scan_empty, "run-small");
+    assert_eq!(m_empty.shards.len(), 3);
+    assert_eq!(m_empty.total_rows, 0);
+    let empty_dest = WorkDir::new(empty_wd.dest_dir());
+    std::fs::create_dir_all(empty_dest.root()).unwrap();
+    let m_empty_dst = rewrite_and_build(&empty_dest, &scan_empty, "run-small");
+    let mut params = verify_params(&empty_wd, &m_empty, &empty_dest, &m_empty_dst);
+    params.pass = 2;
+    let report = verify::run(
+        &empty_wd,
+        &params,
+        Arc::new(FakeChecker::default()),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.status, VerifyStatus::Pass, "{report:?}");
+    assert_eq!(report.namespace.source_entries, 0);
+    assert_eq!(report.namespace.dest_entries, 0);
+}

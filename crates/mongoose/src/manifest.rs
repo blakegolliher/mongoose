@@ -298,11 +298,12 @@ pub fn validate(
             "duplicate manifest shard entry {}",
             shard.path
         );
-        anyhow::ensure!(
-            shard.rows > 0,
-            "manifest shard {} has invalid row count 0",
-            shard.path
-        );
+        // A shard may hold no rows. The walker writes one part per writer
+        // shard whether or not any entry hashed to it, and the rewrite
+        // keeps each one as a canonical shard, so a tree with fewer
+        // entries than writer shards always has empty ones. An empty
+        // shard is still a complete Parquet file: its size, digest and
+        // footer row count (0) are checked like any other's.
         anyhow::ensure!(
             shard.bytes > 0,
             "manifest shard {} has invalid byte count 0",
