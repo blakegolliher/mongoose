@@ -88,6 +88,16 @@ struct Rec {
     row_id: u64,
 }
 
+/// Baseline records, in bytes on disk, that one bucket may hold when it
+/// is joined. A larger bucket is first split by a second hash, so the
+/// join's map stays near 60 MB (about 1.7 times its records) however
+/// large the index is. With 256 buckets no bucket reaches this below
+/// about 57M entries.
+const MAX_JOIN_BYTES: u64 = 32 * 1024 * 1024;
+/// How many times one bucket may be split again. A guard: one split
+/// already brings a bucket under the limit, since paths hash evenly.
+const MAX_SPLIT_DEPTH: u8 = 4;
+
 /// Classify `current` against `baseline`. Both are lists of canonical
 /// parquet shard files. `pending` paths are forced DIRTY on a tuple
 /// match. Outputs land under `out_dir` (created; `keep/` and
@@ -98,6 +108,25 @@ pub fn classify(
     pending: &HashSet<Vec<u8>>,
     out_dir: &Path,
     buckets: usize,
+) -> Result<ClassifyCounts> {
+    classify_with(
+        baseline_shards,
+        current_shards,
+        pending,
+        out_dir,
+        buckets,
+        MAX_JOIN_BYTES,
+    )
+}
+
+/// [`classify`] with the per-bucket join limit as a parameter.
+fn classify_with(
+    baseline_shards: &[PathBuf],
+    current_shards: &[PathBuf],
+    pending: &HashSet<Vec<u8>>,
+    out_dir: &Path,
+    buckets: usize,
+    max_join_bytes: u64,
 ) -> Result<ClassifyCounts> {
     let buckets = buckets.max(1);
     let tmp_dir = out_dir.join("tmp");
@@ -123,51 +152,19 @@ pub fn classify(
         File::create(&deleted_path)
             .with_context(|| format!("creating {}", deleted_path.display()))?,
     );
+    let mut join = Join {
+        pending,
+        keep: &mut keep,
+        deleted: &mut deleted,
+        counts: &mut counts,
+        max_join_bytes,
+    };
     for b in 0..buckets {
-        let base_path = tmp_dir.join(format!("base-{b:04}.bin"));
-        let cur_path = tmp_dir.join(format!("cur-{b:04}.bin"));
-
-        let mut map: HashMap<Vec<u8>, ChangeTuple> = HashMap::new();
-        for rec in RecReader::open(&base_path)? {
-            let rec = rec?;
-            map.insert(rec.path, rec.tuple);
-        }
-        for rec in RecReader::open(&cur_path)? {
-            let rec = rec?;
-            match map.remove(&rec.path) {
-                None => {
-                    counts.new += 1;
-                    keep.push(rec.row_id)?;
-                }
-                Some(base_tuple) if base_tuple == rec.tuple => {
-                    if pending.contains(&rec.path) {
-                        counts.dirty_pending += 1;
-                        keep.push(rec.row_id)?;
-                    } else {
-                        counts.unchanged += 1;
-                    }
-                }
-                Some(_) => {
-                    counts.dirty_tuple += 1;
-                    keep.push(rec.row_id)?;
-                }
-            }
-        }
-        // Baseline leftovers: gone from the source. Recorded only —
-        // deletion is never propagated (MULTI_PASS_MOVER.md).
-        let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        for (path, _tuple) in map.drain() {
-            counts.deleted += 1;
-            let line = serde_json::json!({
-                "path_b64": base64::engine::general_purpose::STANDARD.encode(&path),
-                "ts": ts,
-            });
-            serde_json::to_writer(&mut deleted, &line)?;
-            deleted.write_all(b"\n")?;
-        }
-        // Buckets are independent; free the disk as we go.
-        let _ = std::fs::remove_file(&base_path);
-        let _ = std::fs::remove_file(&cur_path);
+        join.bucket(
+            &tmp_dir.join(format!("base-{b:04}.bin")),
+            &tmp_dir.join(format!("cur-{b:04}.bin")),
+            0,
+        )?;
     }
     deleted.flush()?;
     keep.finish()?;
@@ -185,6 +182,108 @@ pub fn classify(
         "classification complete",
     );
     Ok(counts)
+}
+
+/// What every bucket's join reads and writes.
+struct Join<'a> {
+    pending: &'a HashSet<Vec<u8>>,
+    keep: &'a mut KeepWriters,
+    deleted: &'a mut BufWriter<File>,
+    counts: &'a mut ClassifyCounts,
+    max_join_bytes: u64,
+}
+
+impl Join<'_> {
+    /// Join one bucket, first splitting it by a second hash if its
+    /// baseline side is over the limit. Removes the bucket's files.
+    fn bucket(&mut self, base_path: &Path, cur_path: &Path, depth: u8) -> Result<()> {
+        let size = std::fs::metadata(base_path)
+            .with_context(|| format!("reading {}", base_path.display()))?
+            .len();
+        if size > self.max_join_bytes && depth < MAX_SPLIT_DEPTH {
+            let parts = size.div_ceil(self.max_join_bytes).clamp(2, 256) as usize;
+            let bases = split_bucket(base_path, parts, depth)?;
+            let curs = split_bucket(cur_path, parts, depth)?;
+            for (base, cur) in bases.iter().zip(&curs) {
+                self.bucket(base, cur, depth + 1)?;
+            }
+            return Ok(());
+        }
+
+        let mut map: HashMap<Vec<u8>, ChangeTuple> = HashMap::new();
+        for rec in RecReader::open(base_path)? {
+            let rec = rec?;
+            map.insert(rec.path, rec.tuple);
+        }
+        for rec in RecReader::open(cur_path)? {
+            let rec = rec?;
+            match map.remove(&rec.path) {
+                None => {
+                    self.counts.new += 1;
+                    self.keep.push(rec.row_id)?;
+                }
+                Some(base_tuple) if base_tuple == rec.tuple => {
+                    if self.pending.contains(&rec.path) {
+                        self.counts.dirty_pending += 1;
+                        self.keep.push(rec.row_id)?;
+                    } else {
+                        self.counts.unchanged += 1;
+                    }
+                }
+                Some(_) => {
+                    self.counts.dirty_tuple += 1;
+                    self.keep.push(rec.row_id)?;
+                }
+            }
+        }
+        // Baseline leftovers: gone from the source. Recorded only —
+        // deletion is never propagated (MULTI_PASS_MOVER.md).
+        let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        for (path, _tuple) in map.drain() {
+            self.counts.deleted += 1;
+            let line = serde_json::json!({
+                "path_b64": base64::engine::general_purpose::STANDARD.encode(&path),
+                "ts": ts,
+            });
+            serde_json::to_writer(&mut *self.deleted, &line)?;
+            self.deleted.write_all(b"\n")?;
+        }
+        // Buckets are independent; free the disk as we go.
+        let _ = std::fs::remove_file(base_path);
+        let _ = std::fs::remove_file(cur_path);
+        Ok(())
+    }
+}
+
+/// Split one bucket file into `parts` files by a hash seeded with
+/// `depth`, which is independent of the hash that chose the bucket.
+/// Removes the original and returns the parts in order.
+fn split_bucket(path: &Path, parts: usize, depth: u8) -> Result<Vec<PathBuf>> {
+    let names: Vec<PathBuf> = (0..parts)
+        .map(|i| {
+            let mut name = path.as_os_str().to_owned();
+            name.push(format!(".{depth}-{i:03}"));
+            PathBuf::from(name)
+        })
+        .collect();
+    let mut writers: Vec<BufWriter<File>> = names
+        .iter()
+        .map(|p| {
+            Ok(BufWriter::new(
+                File::create(p).with_context(|| format!("creating {}", p.display()))?,
+            ))
+        })
+        .collect::<Result<_>>()?;
+    for rec in RecReader::open(path)? {
+        let rec = rec?;
+        let i = (fnv1a64_seeded(depth + 1, &rec.path) % parts as u64) as usize;
+        write_rec(&mut writers[i], &rec.path, rec.tuple, rec.row_id)?;
+    }
+    for mut w in writers {
+        w.flush()?;
+    }
+    std::fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
+    Ok(names)
 }
 
 /// Name of the keep file for one source shard, under `keep/`.
@@ -248,6 +347,19 @@ fn partition_side(shards: &[PathBuf], tmp_dir: &Path, tag: &str, buckets: usize)
         w.flush()?;
     }
     Ok(rows)
+}
+
+/// FNV-1a over a seed byte and then the path bytes: the hash that
+/// splits an oversized bucket, different for each split depth.
+fn fnv1a64_seeded(seed: u8, bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    h ^= seed as u64;
+    h = h.wrapping_mul(0x100_0000_01b3);
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    h
 }
 
 /// FNV-1a over path bytes: stable across runs (unlike SipHash), so a
@@ -796,5 +908,78 @@ mod tests {
         let ids = read_keep_file(&out.join("keep").join(keep_file_name(0))).unwrap();
         assert_eq!(ids.len(), 500);
         assert!(ids.windows(2).all(|w| w[0] < w[1]), "sorted, no dups");
+    }
+
+    /// A bucket over the join limit is split by a second hash, again and
+    /// again down to the depth guard, and classifies exactly as an
+    /// unsplit join: same counts, same kept rows, same deletions.
+    #[test]
+    fn oversized_buckets_are_split_and_classify_the_same() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths: Vec<&'static str> = (0..2000)
+            .map(|i| Box::leak(format!("/d{}/f{i:05}", i % 13).into_boxed_str()) as &'static str)
+            .collect();
+        let mut base = Vec::new();
+        let mut cur = Vec::new();
+        for (i, p) in paths.iter().enumerate() {
+            match i % 5 {
+                0 | 1 => {
+                    base.push(row(p, 1, 1, 1));
+                    cur.push(row(p, 1, 1, 1));
+                }
+                2 => {
+                    base.push(row(p, 1, 1, 1));
+                    cur.push(row(p, 2, 2, 2));
+                }
+                3 => base.push(row(p, 1, 1, 1)),
+                _ => cur.push(row(p, 1, 1, 1)),
+            }
+        }
+        let base_p = dir.path().join("base.parquet");
+        let cur_p = dir.path().join("cur.parquet");
+        write_shard(&base_p, 0, &base, true);
+        write_shard(&cur_p, 0, &cur, true);
+        let pending: HashSet<Vec<u8>> = paths
+            .iter()
+            .step_by(10)
+            .map(|p| p.as_bytes().to_vec())
+            .collect();
+
+        let outcome = |name: &str, max_join_bytes: u64| {
+            let out = dir.path().join(name);
+            let counts = classify_with(
+                std::slice::from_ref(&base_p),
+                std::slice::from_ref(&cur_p),
+                &pending,
+                &out,
+                8,
+                max_join_bytes,
+            )
+            .unwrap();
+            let kept = read_keep_file(&out.join("keep").join(keep_file_name(0))).unwrap();
+            let mut deleted: Vec<String> = std::fs::read_to_string(out.join("deleted.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|l| {
+                    serde_json::from_str::<serde_json::Value>(l).unwrap()["path_b64"].to_string()
+                })
+                .collect();
+            deleted.sort();
+            assert!(!out.join("tmp").exists(), "bucket files cleaned up");
+            (counts, kept, deleted)
+        };
+        let whole = outcome("whole", MAX_JOIN_BYTES);
+        // About 280 records of ~60 bytes per bucket: a 256-byte limit
+        // splits every bucket, and its parts again, to the depth guard.
+        let split = outcome("split", 256);
+        assert_eq!(whole, split);
+        let (c, kept, deleted) = whole;
+        assert_eq!(c.unchanged + c.dirty_pending, 800);
+        assert!(c.dirty_pending > 0);
+        assert_eq!(c.dirty_tuple, 400);
+        assert_eq!(c.new, 400);
+        assert_eq!(c.deleted, 400);
+        assert_eq!(kept.len() as u64, c.keep_rows);
+        assert_eq!(deleted.len(), 400);
     }
 }

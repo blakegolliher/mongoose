@@ -229,6 +229,35 @@ pub fn ensure(
     contract: Contract,
     buckets: usize,
 ) -> Result<NamespaceOutcome> {
+    ensure_with(
+        pass_wd,
+        source_shards,
+        dest_shards,
+        contract,
+        buckets,
+        MAX_JOIN_BYTES,
+    )
+}
+
+/// Source entries, in bytes on disk, that one bucket may hold when it is
+/// joined. A larger bucket is first split by a second hash, so the
+/// join's map stays near 60 MB (about 1.8 times its entries) however
+/// large the index is. With 256 buckets no bucket reaches this below
+/// about 55M entries.
+const MAX_JOIN_BYTES: u64 = 32 * 1024 * 1024;
+/// How many times one bucket may be split again. A guard: one split
+/// already brings a bucket under the limit, since paths hash evenly.
+const MAX_SPLIT_DEPTH: u8 = 4;
+
+/// [`ensure`] with the per-bucket join limit as a parameter.
+fn ensure_with(
+    pass_wd: &WorkDir,
+    source_shards: &[PathBuf],
+    dest_shards: &[PathBuf],
+    contract: Contract,
+    buckets: usize,
+    max_join_bytes: u64,
+) -> Result<NamespaceOutcome> {
     let vdir = pass_wd.verify_dir();
     let cp_path = vdir.join(CHECKPOINT);
     if let Some(cp) = read_json_opt::<NamespaceCheckpoint>(&cp_path)? {
@@ -261,71 +290,19 @@ pub fn ensure(
         ..NamespaceCounts::default()
     };
 
+    let mut join = Join {
+        mism: &mut mism,
+        todo: &mut todo,
+        counts: &mut counts,
+        contract,
+        max_join_bytes,
+    };
     for b in 0..buckets {
-        let src_path = tmp.join(format!("src-{b:04}.bin"));
-        let dst_path = tmp.join(format!("dst-{b:04}.bin"));
-        let mut map: HashMap<Vec<u8>, Entry> = HashMap::new();
-        for e in EntryReader::open(&src_path)? {
-            let e = e?;
-            map.insert(e.path.clone(), e);
-        }
-        for e in EntryReader::open(&dst_path)? {
-            let d = e?;
-            match map.remove(&d.path) {
-                None => {
-                    counts.extra += 1;
-                    write_mismatch(
-                        &mut mism,
-                        &mut counts,
-                        Mismatch::new(&d.path, MismatchKind::Extra).actual(type_name(d.file_type)),
-                    )?;
-                }
-                Some(s) => {
-                    let cmp = compare(&s, &d, contract);
-                    if s.file_type == d.file_type {
-                        counts.matched += 1;
-                    }
-                    for m in cmp.mismatches {
-                        match m.kind {
-                            MismatchKind::FileType => counts.file_type += 1,
-                            MismatchKind::Size => counts.size += 1,
-                            MismatchKind::Mode => counts.mode += 1,
-                            MismatchKind::Owner => counts.owner += 1,
-                            MismatchKind::Mtime => counts.mtime += 1,
-                            _ => {}
-                        }
-                        write_mismatch(&mut mism, &mut counts, m)?;
-                    }
-                    if let Some(kind) = cmp.todo {
-                        match kind {
-                            TodoKind::File { size } => {
-                                counts.files_to_read += 1;
-                                counts.bytes_to_read += size;
-                            }
-                            TodoKind::Symlink => counts.symlinks_to_read += 1,
-                        }
-                        todo.push(&TodoEntry { path: s.path, kind })?;
-                    }
-                }
-            }
-        }
-        // Source leftovers: nothing at that path on the destination.
-        let mut leftovers: Vec<Entry> = map.into_values().collect();
-        leftovers.sort_by(|a, b| a.path.cmp(&b.path));
-        for s in leftovers {
-            let m = if is_special(s.file_type) {
-                counts.special_not_copied += 1;
-                Mismatch::new(&s.path, MismatchKind::SpecialNotCopied)
-                    .expected(type_name(s.file_type))
-                    .detail("mongoose does not copy fifos, sockets, or device nodes")
-            } else {
-                counts.missing += 1;
-                Mismatch::new(&s.path, MismatchKind::Missing).expected(type_name(s.file_type))
-            };
-            write_mismatch(&mut mism, &mut counts, m)?;
-        }
-        let _ = std::fs::remove_file(&src_path);
-        let _ = std::fs::remove_file(&dst_path);
+        join.bucket(
+            &tmp.join(format!("src-{b:04}.bin")),
+            &tmp.join(format!("dst-{b:04}.bin")),
+            0,
+        )?;
     }
 
     mism.flush()?;
@@ -356,6 +333,138 @@ pub fn ensure(
         counts,
         mismatch_file_len,
     })
+}
+
+/// What every bucket's join reads and writes.
+struct Join<'a> {
+    mism: &'a mut BufWriter<File>,
+    todo: &'a mut TodoWriter,
+    counts: &'a mut NamespaceCounts,
+    contract: Contract,
+    max_join_bytes: u64,
+}
+
+impl Join<'_> {
+    /// Join one bucket, first splitting it by a second hash if its
+    /// source side is over the limit. Removes the bucket's files.
+    fn bucket(&mut self, src_path: &Path, dst_path: &Path, depth: u8) -> Result<()> {
+        let size = std::fs::metadata(src_path)
+            .with_context(|| format!("reading {}", src_path.display()))?
+            .len();
+        if size > self.max_join_bytes && depth < MAX_SPLIT_DEPTH {
+            let parts = size.div_ceil(self.max_join_bytes).clamp(2, 256) as usize;
+            let srcs = split_bucket(src_path, parts, depth)?;
+            let dsts = split_bucket(dst_path, parts, depth)?;
+            for (src, dst) in srcs.iter().zip(&dsts) {
+                self.bucket(src, dst, depth + 1)?;
+            }
+            return Ok(());
+        }
+
+        let mut map: HashMap<Vec<u8>, Entry> = HashMap::new();
+        for e in EntryReader::open(src_path)? {
+            let mut e = e?;
+            // The key holds the path; the entry's own copy would double it.
+            let path = std::mem::take(&mut e.path);
+            map.insert(path, e);
+        }
+        for e in EntryReader::open(dst_path)? {
+            let d = e?;
+            match map.remove_entry(&d.path) {
+                None => {
+                    self.counts.extra += 1;
+                    write_mismatch(
+                        self.mism,
+                        self.counts,
+                        Mismatch::new(&d.path, MismatchKind::Extra).actual(type_name(d.file_type)),
+                    )?;
+                }
+                Some((path, mut s)) => {
+                    s.path = path;
+                    let cmp = compare(&s, &d, self.contract);
+                    if s.file_type == d.file_type {
+                        self.counts.matched += 1;
+                    }
+                    for m in cmp.mismatches {
+                        match m.kind {
+                            MismatchKind::FileType => self.counts.file_type += 1,
+                            MismatchKind::Size => self.counts.size += 1,
+                            MismatchKind::Mode => self.counts.mode += 1,
+                            MismatchKind::Owner => self.counts.owner += 1,
+                            MismatchKind::Mtime => self.counts.mtime += 1,
+                            _ => {}
+                        }
+                        write_mismatch(self.mism, self.counts, m)?;
+                    }
+                    if let Some(kind) = cmp.todo {
+                        match kind {
+                            TodoKind::File { size } => {
+                                self.counts.files_to_read += 1;
+                                self.counts.bytes_to_read += size;
+                            }
+                            TodoKind::Symlink => self.counts.symlinks_to_read += 1,
+                        }
+                        self.todo.push(&TodoEntry { path: s.path, kind })?;
+                    }
+                }
+            }
+        }
+        // Source leftovers: nothing at that path on the destination.
+        let mut leftovers: Vec<Entry> = map
+            .into_iter()
+            .map(|(path, mut e)| {
+                e.path = path;
+                e
+            })
+            .collect();
+        leftovers.sort_by(|a, b| a.path.cmp(&b.path));
+        for s in leftovers {
+            let m = if is_special(s.file_type) {
+                self.counts.special_not_copied += 1;
+                Mismatch::new(&s.path, MismatchKind::SpecialNotCopied)
+                    .expected(type_name(s.file_type))
+                    .detail("mongoose does not copy fifos, sockets, or device nodes")
+            } else {
+                self.counts.missing += 1;
+                Mismatch::new(&s.path, MismatchKind::Missing).expected(type_name(s.file_type))
+            };
+            write_mismatch(self.mism, self.counts, m)?;
+        }
+        let _ = std::fs::remove_file(src_path);
+        let _ = std::fs::remove_file(dst_path);
+        Ok(())
+    }
+}
+
+/// Split one bucket file into `parts` files by a hash seeded with
+/// `depth`, which is independent of the hash that chose the bucket.
+/// Removes the original and returns the parts in order.
+fn split_bucket(path: &Path, parts: usize, depth: u8) -> Result<Vec<PathBuf>> {
+    let names: Vec<PathBuf> = (0..parts)
+        .map(|i| {
+            let mut name = path.as_os_str().to_owned();
+            name.push(format!(".{depth}-{i:03}"));
+            PathBuf::from(name)
+        })
+        .collect();
+    let mut writers: Vec<BufWriter<File>> = names
+        .iter()
+        .map(|p| {
+            Ok(BufWriter::new(
+                File::create(p).with_context(|| format!("creating {}", p.display()))?,
+            ))
+        })
+        .collect::<Result<_>>()?;
+    for e in EntryReader::open(path)? {
+        let e = e?;
+        let i = (fnv1a64_seeded(depth + 1, &e.path) % parts as u64) as usize;
+        write_entry(&mut writers[i], &e)?;
+    }
+    for mut w in writers {
+        w.flush()?;
+    }
+    std::fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
+    Ok(names)
 }
 
 fn write_mismatch(w: &mut impl Write, counts: &mut NamespaceCounts, m: Mismatch) -> Result<()> {
@@ -399,6 +508,19 @@ fn partition(shards: &[PathBuf], tmp: &Path, tag: &str, buckets: usize) -> Resul
         w.flush()?;
     }
     Ok(n)
+}
+
+/// FNV-1a over a seed byte and then the path bytes: the hash that
+/// splits an oversized bucket, different for each split depth.
+fn fnv1a64_seeded(seed: u8, bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    h ^= seed as u64;
+    h = h.wrapping_mul(0x100_0000_01b3);
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    h
 }
 
 /// FNV-1a over path bytes: stable across runs, unlike SipHash.
@@ -930,6 +1052,68 @@ pub(crate) mod tests {
             .map(|e| e.unwrap())
             .collect();
         (out.counts, read_mismatches(&pass_wd), todo)
+    }
+
+    /// A bucket over the join limit is split by a second hash, again and
+    /// again down to the depth guard, and the join reports exactly what
+    /// an unsplit join does: the same counts, mismatches and content
+    /// queue (their order may differ).
+    #[test]
+    fn oversized_buckets_are_split_and_join_the_same() {
+        let mut src = Vec::new();
+        let mut dst = Vec::new();
+        for i in 0..1500u64 {
+            let path = format!("/d{}/f{i:05}", i % 11).into_bytes();
+            let size = i + 1; // non-empty, so every match queues a read
+            match i % 6 {
+                0 | 1 => {
+                    src.push(file(&path, size));
+                    dst.push(file(&path, size));
+                }
+                2 => {
+                    src.push(file(&path, size));
+                    dst.push(file(&path, size + 1));
+                }
+                3 => src.push(file(&path, size)),
+                4 => dst.push(file(&path, size)),
+                _ => src.push(entry(&path, FileTypeTag::Fifo, 0)),
+            }
+        }
+        let run = |max_join_bytes: u64| {
+            let tmp = tempfile::tempdir().unwrap();
+            let pass_wd = WorkDir::new(tmp.path().join("pass"));
+            let s = shards(tmp.path(), "src", &[src.clone()]);
+            let d = shards(tmp.path(), "dst", &[dst.clone()]);
+            let out = ensure_with(&pass_wd, &s, &d, Contract::strict(), 8, max_join_bytes).unwrap();
+            assert!(
+                !pass_wd.verify_dir().join("tmp").exists(),
+                "bucket files cleaned up"
+            );
+            let mut mismatches: Vec<String> = read_mismatches(&pass_wd)
+                .iter()
+                .map(|m| serde_json::to_string(m).unwrap())
+                .collect();
+            mismatches.sort();
+            let mut todo: Vec<Vec<u8>> = TodoReader::open(&pass_wd.verify_dir().join(TODO_FILE))
+                .unwrap()
+                .map(|e| e.unwrap().path)
+                .collect();
+            todo.sort();
+            (out.counts, mismatches, todo)
+        };
+        let whole = run(MAX_JOIN_BYTES);
+        // About 150 entries of ~55 bytes per source bucket: a 256-byte
+        // limit splits every bucket, and its parts again.
+        let split = run(256);
+        assert_eq!(whole, split);
+        let (c, mismatches, todo) = whole;
+        assert_eq!(c.matched, 750);
+        assert_eq!(c.size, 250);
+        assert_eq!(c.missing, 250);
+        assert_eq!(c.extra, 250);
+        assert_eq!(c.special_not_copied, 250);
+        assert_eq!(mismatches.len() as u64, c.mismatches);
+        assert_eq!(todo.len(), 500, "the matched files of equal size");
     }
 
     /// A special node absent from the destination is exactly one

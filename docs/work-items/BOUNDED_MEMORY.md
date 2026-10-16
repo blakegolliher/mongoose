@@ -6,8 +6,8 @@ with the number of entries is to be streamed, spilled to disk, or capped by a
 budget, with correct behavior when something is evicted.
 
 **Status (2026-10-16):** the walker scan is bounded (nfs-walker `f6f7572`,
-mongoose PR #26). Step 1 is closed with no change, and step 2 is in this
-change. Steps 3 to 6 are open.
+mongoose PR #26). Step 1 is closed with no change, step 2 merged (PR #31),
+and step 3 is in this change. Steps 4 to 6 are open.
 
 ## What grows with tree size
 
@@ -61,10 +61,26 @@ Fixed but large: each copy micro-batch spawns all of its rows at once, at
 
    The rows (whole-row hash), the row ids and the footer metadata are
    identical.
-3. **Joins.** Choose the bucket count for classify and the namespace check
-   from the index size, which is known before the join, so a bucket stays
-   at about 100 MB or less. Store each path once. When the count would
-   exceed the open-file limit, partition in several passes.
+3. **Joins.** Both joins keep their 256 first-level buckets, so they never
+   hold more than 256 files open. Before a bucket is joined, a side over
+   32 MiB on disk (the side loaded into memory) is split again by a hash
+   seeded with the split depth, and its parts are joined in turn, down to
+   four levels. Each join's map therefore stays near 60 MB at any index
+   size. Below about 55M entries no bucket splits. The namespace map now
+   stores each path once, as its key.
+
+   On a 48M-entry index (24 copies of the fs-sim tree) joined against
+   itself, with 8 buckets so that each held 6M entries, the bucket size of
+   a ~1.5B-entry tree:
+
+   | Join | Peak RSS before | Peak RSS after | Time before | Time after |
+   |---|---|---|---|---|
+   | Classify, 8 buckets | 1,477 MB | 55 MB | 184 s | 191 s |
+   | Namespace, 8 buckets | 2,297 MB | 124 MB | 291 s | 321 s |
+   | Classify, 256 buckets (no split) | 57 MB | 63 MB | 156 s | 155 s |
+
+   Both versions gave identical counts. A split costs one extra write and
+   read of the bucket files.
 4. **Directory caches.** Cap them by bytes. A miss repeats a LOOKUP or an
    mkdir, which is correct and only slower. This needs a directory-heavy
    test tree on real NFS to measure the hit rate (fs-sim-1 has 4,764
