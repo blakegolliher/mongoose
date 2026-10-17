@@ -17,7 +17,8 @@
 //! path, never counted as a copied file, always leaves a durable
 //! record with its raw path, completes its shard without being
 //! retried, and blocks cutover until the destination has a node of
-//! the same type.
+//! the same type. It also pins down the shard-end directory re-stamp,
+//! which reads a shard's directory rows back from the shard file.
 
 use arrow::array::{
     ArrayRef, BinaryBuilder, Int64Builder, StringBuilder, UInt16Builder, UInt32Builder,
@@ -37,7 +38,7 @@ use migration_mover::batch::{BatchBudget, InflightLimiter, InflightProfile};
 use migration_mover::strategy::Strategy;
 use migration_mover::{
     ContextPair, DowngradeSink, FailureSink, FileMover, LibnfsContextPool, MoveOutcome, Mover,
-    MoverConfig,
+    MoverConfig, Spilled,
 };
 use migration_worker::events::EventEmitter;
 use migration_worker::heartbeat::LivePending;
@@ -45,7 +46,7 @@ use migration_worker::shard_processor::{ProcessOutcome, ShardProcessor};
 use migration_worker::throughput::ThroughputCounter;
 use mongoose::copy::{special_not_copied_notice, CopySummary};
 use mongoose::manifest::{self, LocalManifest};
-use mongoose::progress::{persist_shard_results_then, write_shard_jsonl, CopyProgress};
+use mongoose::progress::{persist_shard_results_then, place_shard_jsonl, spill_path, CopyProgress};
 use mongoose::verify::content::{CheckResult, ContentChecker, TodoEntry};
 use mongoose::verify::{self, MismatchKind, VerifyParams, VerifyReport, VerifyStatus};
 use mongoose::workdir::WorkDir;
@@ -211,12 +212,14 @@ impl LibnfsContextPool for NoNfs {
     }
 }
 
-/// The real `Mover`, except that a regular-file copy is recorded
-/// instead of performed. Every other row, every special node included,
-/// is decided by `Mover::move_one`.
+/// The real `Mover`, except that a regular-file copy and a directory's
+/// attributes are recorded instead of performed. Every other row,
+/// every special node included, is decided by `Mover::move_one`.
 struct RecordingMover {
     real: Mover,
     created: Mutex<Vec<Vec<u8>>>,
+    /// Directory rows, in the order they were stamped.
+    stamped: Mutex<Vec<Vec<u8>>>,
 }
 
 impl RecordingMover {
@@ -231,11 +234,16 @@ impl RecordingMover {
         Self {
             real: Mover::new(cfg, Arc::new(NoNfs), "test-host", downgrades, Fence::new()),
             created: Mutex::new(Vec::new()),
+            stamped: Mutex::new(Vec::new()),
         }
     }
 
     fn created(&self) -> Vec<Vec<u8>> {
         self.created.lock().unwrap().clone()
+    }
+
+    fn stamped(&self) -> Vec<Vec<u8>> {
+        self.stamped.lock().unwrap().clone()
     }
 }
 
@@ -248,6 +256,16 @@ impl FileMover for RecordingMover {
                 row_id: row.row_id,
                 strategy: Strategy::LibnfsIoUring,
                 bytes_moved: row.size,
+                torn: false,
+                result: Ok(()),
+            };
+        }
+        if row.file_type == FileTypeTag::Dir {
+            self.stamped.lock().unwrap().push(row.path.clone());
+            return MoveOutcome {
+                row_id: row.row_id,
+                strategy: Strategy::DirAttrs,
+                bytes_moved: 0,
                 torn: false,
                 result: Ok(()),
             };
@@ -267,40 +285,59 @@ impl FileMover for RecordingMover {
 struct Copied {
     outcome: ProcessOutcome,
     created: Vec<Vec<u8>>,
-    downgrades_jsonl: Vec<u8>,
-    failures_jsonl: Vec<u8>,
+    stamped: Vec<Vec<u8>>,
+    /// The shard's records, spilled as the copy loop spills them.
+    downgrades: Option<Spilled>,
+    failures: Option<Spilled>,
     live: Arc<LivePending>,
 }
 
 /// Process one shard exactly as `mongoose copy` does, up to the point
 /// where it persists the results.
-async fn copy_shard(shard_name: &str, shard: &Path) -> Copied {
+async fn copy_shard(wd: &WorkDir, shard: &manifest::LocalShard) -> Copied {
+    copy_shard_in_batches(wd, shard, BatchBudget::default()).await
+}
+
+async fn copy_shard_in_batches(
+    wd: &WorkDir,
+    shard: &manifest::LocalShard,
+    budget: BatchBudget,
+) -> Copied {
     let downgrades = DowngradeSink::new();
     let failures = FailureSink::new();
-    downgrades.set_current_shard(shard_name);
-    failures.set_current_shard(shard_name);
+    downgrades.set_current_shard(shard.file_name());
+    failures.set_current_shard(shard.file_name());
+    failures
+        .spill_to(&spill_path(&wd.failures_dir(), shard.stem()).unwrap())
+        .unwrap();
+    downgrades
+        .spill_to(&spill_path(&wd.downgrades_dir(), shard.stem()).unwrap())
+        .unwrap();
     let mover = Arc::new(RecordingMover::new(downgrades.clone()));
     let live = Arc::new(LivePending::default());
     let mut processor = ShardProcessor {
         mover: Arc::clone(&mover) as Arc<dyn FileMover>,
         live: Arc::clone(&live),
         fence: Fence::new(),
-        budget: BatchBudget::default(),
+        budget,
         inflight: InflightLimiter::new(&InflightProfile::default()),
         failures: failures.clone(),
         throughput: ThroughputCounter::new(),
-        dir_restamp: Vec::new(),
         fsid_ungrouped_warned: false,
         emitter: EventEmitter::disabled(),
         run_control: None,
         stop: CancellationToken::new(),
     };
-    let outcome = processor.process(shard).await.unwrap();
+    let outcome = processor
+        .process(&wd.shard_path(&shard.path))
+        .await
+        .unwrap();
     Copied {
         outcome,
         created: mover.created(),
-        downgrades_jsonl: downgrades.drain_jsonl(),
-        failures_jsonl: failures.drain_jsonl(),
+        stamped: mover.stamped(),
+        downgrades: downgrades.finish_spill().unwrap(),
+        failures: failures.finish_spill().unwrap(),
         live,
     }
 }
@@ -310,6 +347,10 @@ fn parse_downgrades(body: &[u8]) -> Vec<DowngradeRecord> {
         .filter(|l| !l.is_empty())
         .map(|l| serde_json::from_slice(l).unwrap())
         .collect()
+}
+
+fn records(spilled: &Option<Spilled>) -> u64 {
+    spilled.as_ref().expect("the shard spilled").records
 }
 
 fn record_path(r: &DowngradeRecord) -> Vec<u8> {
@@ -420,7 +461,7 @@ async fn special_nodes_are_omitted_truthfully_and_block_cutover() {
     );
 
     // ---- 2 and 3. copy: one file created, four omissions -----------
-    let copied = copy_shard(shard.file_name(), &shard_path).await;
+    let copied = copy_shard(&wd, shard).await;
     assert_eq!(
         copied.created,
         [FILE.to_vec()],
@@ -439,8 +480,9 @@ async fn special_nodes_are_omitted_truthfully_and_block_cutover() {
         "every row is accounted for"
     );
     assert!(!o.interrupted && !o.fenced);
-    assert!(
-        copied.failures_jsonl.is_empty(),
+    assert_eq!(
+        records(&copied.failures),
+        0,
         "nothing for a retry to pick up"
     );
     // The live counters the heartbeat and ticker read agree.
@@ -456,9 +498,9 @@ async fn special_nodes_are_omitted_truthfully_and_block_cutover() {
         &wd.failures_dir(),
         &wd.downgrades_dir(),
         shard.stem(),
-        &copied.failures_jsonl,
-        &copied.downgrades_jsonl,
-        write_shard_jsonl,
+        copied.failures,
+        copied.downgrades,
+        place_shard_jsonl,
         || {
             progress.record_shard(&shard.path, &copied.outcome, 0.0);
             progress.write(&wd)
@@ -469,6 +511,15 @@ async fn special_nodes_are_omitted_truthfully_and_block_cutover() {
     let downgrade_file =
         downgrade_file.expect("the omissions are on disk before the shard commits");
     assert!(downgrade_file.starts_with(wd.downgrades_dir()));
+    // Only the placed result files remain; no spill is left behind.
+    for (dir, want) in [(wd.failures_dir(), 0), (wd.downgrades_dir(), 1)] {
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            want,
+            "{}",
+            dir.display()
+        );
+    }
 
     let mut records = parse_downgrades(&std::fs::read(&downgrade_file).unwrap());
     records.sort_by_key(|r| r.row_id);
@@ -602,7 +653,7 @@ async fn hardlinked_special_nodes_are_each_an_omission_not_a_failed_link() {
         .iter()
         .all(|r| r.nlink == Some(2) && r.inode == Some(777) && r.fsid == Some(9)));
 
-    let copied = copy_shard(shard.file_name(), &shard_path).await;
+    let copied = copy_shard(&wd, shard).await;
 
     assert_eq!(copied.outcome.files_special_not_copied, 2);
     assert_eq!(
@@ -610,12 +661,58 @@ async fn hardlinked_special_nodes_are_each_an_omission_not_a_failed_link() {
         "no link against a node that was never created"
     );
     assert_eq!(copied.outcome.files_ok, 0);
-    assert!(copied.failures_jsonl.is_empty());
+    assert_eq!(records(&copied.failures), 0);
     assert!(copied.created.is_empty());
-    let mut paths: Vec<Vec<u8>> = parse_downgrades(&copied.downgrades_jsonl)
+    let spilled = copied.downgrades.as_ref().expect("the shard spilled");
+    let mut paths: Vec<Vec<u8>> = parse_downgrades(&std::fs::read(&spilled.path).unwrap())
         .iter()
         .map(record_path)
         .collect();
     paths.sort();
     assert_eq!(paths, [b"/a/pipe".to_vec(), b"/b/pipe-link".to_vec()]);
+}
+
+/// Every directory is stamped in its batch, and once more after the
+/// shard's last batch, from rows read back out of the shard file.
+#[tokio::test]
+async fn directories_are_restamped_from_the_shard_file_after_the_last_batch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wd = WorkDir::new(tmp.path());
+    let dir = |path: &'static [u8], inode| wrow(path, "directory", 0o755, inode);
+    let file = |path: &'static [u8], inode| WalkerRow {
+        size: 3,
+        ..wrow(path, "file", 0o644, inode)
+    };
+    let m = rewrite_and_build(
+        &wd,
+        &[
+            dir(b"/a", 1),
+            file(b"/a/f1", 2),
+            dir(b"/a/b", 3),
+            file(b"/a/b/f2", 4),
+            dir(b"/c-\xff", 5),
+            file(b"/c-\xff/f3", 6),
+        ],
+    );
+    let shard = &m.shards[0];
+    let budget = BatchBudget {
+        files: 2,
+        ..BatchBudget::default()
+    };
+    let copied = copy_shard_in_batches(&wd, shard, budget).await;
+    assert_eq!(copied.outcome.files_ok, 6, "each row counted once");
+    assert_eq!(copied.outcome.files_failed, 0);
+    let dirs = |mut v: Vec<Vec<u8>>| {
+        v.sort();
+        v
+    };
+    let all = dirs(vec![b"/a".to_vec(), b"/a/b".to_vec(), b"/c-\xff".to_vec()]);
+    let (in_batches, restamp) = copied.stamped.split_at(3);
+    assert_eq!(dirs(in_batches.to_vec()), all);
+    assert_eq!(
+        dirs(restamp.to_vec()),
+        all,
+        "the re-stamp covers every directory"
+    );
+    assert_eq!(copied.created.len(), 3);
 }

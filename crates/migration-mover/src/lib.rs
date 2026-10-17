@@ -33,6 +33,7 @@ pub mod paths;
 pub mod pipelined_copy;
 pub mod reorder;
 pub mod root_mtime;
+mod spill;
 pub mod strategy;
 pub use bucketed_pool::{
     bucket_for_size, AsyncNfsContextPair, BucketConfig, BucketedAsyncPool, BUCKETS,
@@ -48,3 +49,4 @@ pub use mover::{MoveOutcome, Mover, MoverConfig};
 pub use paths::join_root;
 pub use pipelined_copy::{pipelined_copy, FileCopyResult};
 pub use root_mtime::restore_root_mtime;
+pub use spill::Spilled;

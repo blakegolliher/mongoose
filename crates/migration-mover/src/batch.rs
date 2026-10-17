@@ -88,9 +88,9 @@ impl Default for InflightProfile {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SizeClass {
-    Small,
-    Medium,
-    Large,
+    Small = 0,
+    Medium = 1,
+    Large = 2,
 }
 
 impl SizeClass {
@@ -118,15 +118,28 @@ pub struct InflightLimiter {
     small: Arc<Semaphore>,
     medium: Arc<Semaphore>,
     large: Arc<Semaphore>,
+    /// Permits per class: small, medium, large.
+    permits: [usize; 3],
 }
 
 impl InflightLimiter {
     pub fn new(profile: &InflightProfile) -> Self {
+        let permits = [
+            profile.small.max(1),
+            profile.medium.max(1),
+            profile.large.max(1),
+        ];
         Self {
-            small: Arc::new(Semaphore::new(profile.small.max(1))),
-            medium: Arc::new(Semaphore::new(profile.medium.max(1))),
-            large: Arc::new(Semaphore::new(profile.large.max(1))),
+            small: Arc::new(Semaphore::new(permits[0])),
+            medium: Arc::new(Semaphore::new(permits[1])),
+            large: Arc::new(Semaphore::new(permits[2])),
+            permits,
         }
+    }
+
+    /// How many rows of `class` may hold a permit at once.
+    pub fn permits(&self, class: SizeClass) -> usize {
+        self.permits[class as usize]
     }
 
     /// Acquire the appropriate permit for `size`. The returned guard
@@ -168,5 +181,8 @@ mod tests {
         // Large semaphore likewise independent.
         let l1 = lim.acquire(2 * 1024 * 1024 * 1024).await;
         drop((s1, s2, m1, l1));
+        assert_eq!(lim.permits(SizeClass::Small), 2);
+        assert_eq!(lim.permits(SizeClass::Medium), 1);
+        assert_eq!(lim.permits(SizeClass::Large), 1);
     }
 }

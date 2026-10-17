@@ -18,7 +18,7 @@ use crate::cli::Tuning;
 use crate::endpoint;
 use crate::identity;
 use crate::manifest::{self, ExpectedIdentity, LocalManifest, ManifestKind};
-use crate::progress::{persist_shard_results_then, write_shard_jsonl, CopyProgress};
+use crate::progress::{persist_shard_results_then, place_shard_jsonl, spill_path, CopyProgress};
 use crate::stop::{StopReason, StopState};
 use crate::util::raise_fd_limit;
 use crate::workdir::WorkDir;
@@ -321,6 +321,10 @@ pub(crate) async fn run_manifest_with_stop(
         println!("shard {} ({} rows)", shard.file_name(), shard.rows);
         downgrades.set_current_shard(shard.file_name());
         failures.set_current_shard(shard.file_name());
+        // The shard's records go to disk as they arrive: a shard can
+        // have one per row, too many to hold.
+        failures.spill_to(&spill_path(&wd.failures_dir(), shard.stem())?)?;
+        downgrades.spill_to(&spill_path(&wd.downgrades_dir(), shard.stem())?)?;
         live.reset();
 
         let mut processor = ShardProcessor {
@@ -331,7 +335,6 @@ pub(crate) async fn run_manifest_with_stop(
             inflight: inflight.clone(),
             failures: failures.clone(),
             throughput: throughput.clone(),
-            dir_restamp: Vec::new(),
             fsid_ungrouped_warned: false,
             emitter: EventEmitter::disabled(),
             run_control: None,
@@ -342,18 +345,16 @@ pub(crate) async fn run_manifest_with_stop(
             .await
             .with_context(|| format!("processing shard {}", parquet.display()))?;
 
-        // Drain this shard's failure/downgrade records to local JSONL
-        // before the shard is marked complete, so an interruption
+        // Put this shard's failure/downgrade records in place as local
+        // JSONL before the shard is marked complete, so an interruption
         // between the two never loses records.
-        let failures_jsonl = failures.drain_jsonl();
-        let downgrades_jsonl = downgrades.drain_jsonl();
         let (failure_path, downgrade_path, ()) = persist_shard_results_then(
             &wd.failures_dir(),
             &wd.downgrades_dir(),
             shard.stem(),
-            &failures_jsonl,
-            &downgrades_jsonl,
-            write_shard_jsonl,
+            failures.finish_spill()?,
+            downgrades.finish_spill()?,
+            place_shard_jsonl,
             || {
                 if !outcome.interrupted {
                     progress.record_shard(&shard.path, &outcome, throughput.sample_mb_s(60));
