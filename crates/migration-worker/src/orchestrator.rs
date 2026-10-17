@@ -770,7 +770,6 @@ pub async fn run_with_stop(
         // limiter/sinks/throughput so all shards report into one
         // throughput counter and one failure log per host.
         let mut processor = ShardProcessor {
-            dir_restamp: Vec::new(),
             live: Arc::clone(&live),
             mover: Arc::clone(&mover),
             fence: fence.clone(),

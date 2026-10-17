@@ -9,7 +9,9 @@
 //! - Within a batch, rows are partitioned into **hardlink groups** and
 //!   **singletons**:
 //!   - Singletons: each gets its own task; up to `inflight_*` (per
-//!     size class) tasks run in parallel.
+//!     size class) tasks run in parallel. A task is spawned when its
+//!     class has a free permit, not before, so a batch never holds a
+//!     task per row.
 //!   - Hardlink groups (same `(fsid, inode)` and `nlink > 1`): each
 //!     group becomes one task, processing its rows **sequentially**
 //!     so the first row is fully renamed before subsequent rows
@@ -74,17 +76,54 @@ use migration_core::fence::Fence;
 use migration_core::records::{DowngradeKind, FailurePhase};
 use migration_core::schema::FileTypeTag;
 use migration_core::shard::{RowView, ShardReader};
-use migration_mover::batch::{Batch, BatchBudget, InflightLimiter};
+use migration_mover::batch::{Batch, BatchBudget, InflightLimiter, SizeClass};
 use migration_mover::strategy::Strategy;
 use migration_mover::{FailureSink, FileMover, MoveOutcome};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
-use tokio::task::JoinSet;
+use tokio::task::{AbortHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 /// Filesystem-scoped hardlink-map key.
 type HardlinkKey = (u64, u64);
+
+/// How many shard-end re-stamp rows are read ahead of the ones running.
+const RESTAMP_LOOKAHEAD: usize = 1024;
+
+/// One task's work: a lone row, or a hardlink group whose rows run in
+/// order on one task.
+enum Job {
+    Row(RowView),
+    Group(Vec<RowView>),
+}
+
+impl Job {
+    /// The size class whose permits the job waits for. A group's rows
+    /// share an inode, so its first row speaks for all of them.
+    fn class(&self) -> SizeClass {
+        let size = match self {
+            Job::Row(row) => row.size,
+            Job::Group(rows) => rows.first().map_or(0, |row| row.size),
+        };
+        SizeClass::classify(size)
+    }
+}
+
+/// Which rows a dispatch runs, which decides how their outcomes count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// Files, symlinks, special nodes and hardlink groups.
+    Rows,
+    /// A batch's directories, one depth level at a time.
+    Dirs,
+    /// The shard-end replay of every directory's attributes. Their
+    /// successes were counted when their batch ran, so only failures
+    /// are recorded.
+    Restamp,
+}
+
+const CLASSES: [SizeClass; 3] = [SizeClass::Small, SizeClass::Medium, SizeClass::Large];
 
 pub struct ShardProcessor {
     pub mover: Arc<dyn FileMover>,
@@ -98,13 +137,6 @@ pub struct ShardProcessor {
     pub inflight: InflightLimiter,
     pub failures: FailureSink,
     pub throughput: ThroughputCounter,
-    /// Directory rows seen in this shard, kept for the shard-end
-    /// attr re-stamp: every file CREATE bumps its parent dir's mtime,
-    /// so per-batch dir stamping is undone by later batches. One
-    /// idempotent DirAttrs replay after the last batch makes dir
-    /// mtimes correct at shard scope (cross-shard children remain the
-    /// documented caveat).
-    pub dir_restamp: Vec<RowView>,
     /// Set true the first time we see a hardlinked, inode-bearing row with no
     /// `fsid`; gates the one-shot WARN + `FsidUngrouped` downgrade.
     pub fsid_ungrouped_warned: bool,
@@ -130,7 +162,7 @@ impl ShardProcessor {
 
         // Per-shard state reset.
         self.fsid_ungrouped_warned = false;
-        self.dir_restamp.clear();
+        let mut dirs: u64 = 0;
 
         let mut current = Batch::default();
         let mut outcome = ProcessOutcome {
@@ -172,6 +204,9 @@ impl ShardProcessor {
                     return Ok(outcome.with_interrupted(true));
                 }
             }
+            if row.file_type == FileTypeTag::Dir {
+                dirs += 1;
+            }
             current.push(row);
         }
 
@@ -184,50 +219,22 @@ impl ShardProcessor {
         }
 
         // ---- Shard-end dir attr re-stamp -----------------------------
-        // Replays DirAttrs for every dir row now that no more file
-        // CREATEs in this shard can bump parent mtimes. Idempotent; no
-        // ordering requirement (SETATTR on a child dir does not touch
-        // its parent). Failures count normally.
-        if !self.dir_restamp.is_empty() {
-            tracing::info!(
-                dirs = self.dir_restamp.len(),
-                "shard-end directory attr re-stamp",
-            );
-            let rows = std::mem::take(&mut self.dir_restamp);
-            let mut joins: JoinSet<Vec<(RowView, MoveOutcome)>> = JoinSet::new();
-            for row in rows {
-                let mover = Arc::clone(&self.mover);
-                let inflight = self.inflight.clone();
-                let fence = self.fence.clone();
-                joins.spawn(async move {
-                    if !fence.is_valid() {
-                        return Vec::new();
-                    }
-                    let _permit = inflight.acquire(row.size).await;
-                    if !fence.is_valid() {
-                        return Vec::new();
-                    }
-                    let mo = mover.move_one(&row).await;
-                    vec![(row, mo)]
-                });
-            }
-            while let Some(joined) = joins.join_next().await {
-                match joined {
-                    Ok(results) => {
-                        for (row, mo) in results {
-                            // Only surface restamp *failures*; successes were
-                            // already counted when the row ran in its batch.
-                            if mo.result.is_err() {
-                                self.record(&row, mo, &mut outcome);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        outcome.files_failed += 1;
-                        tracing::error!(error = ?e, "dir restamp task join failed");
-                    }
-                }
-            }
+        // Every file CREATE bumps its parent dir's mtime, so per-batch
+        // dir stamping is undone by later batches. Replays DirAttrs for
+        // every dir row now that no more file CREATEs in this shard can
+        // bump parent mtimes (cross-shard children remain the
+        // documented caveat). Idempotent; no ordering requirement
+        // (SETATTR on a child dir does not touch its parent). Failures
+        // count normally. The dir rows are read back from the shard
+        // file instead of being held since their batch ran.
+        if dirs > 0 {
+            tracing::info!(dirs, "shard-end directory attr re-stamp");
+            let rows = ShardReader::open(parquet_path)?
+                .into_rows()?
+                .filter(|row| !matches!(row, Ok(r) if r.file_type != FileTypeTag::Dir))
+                .map(|row| row.map(Job::Row).map_err(anyhow::Error::from));
+            self.dispatch(rows, RESTAMP_LOOKAHEAD, Phase::Restamp, &mut outcome)
+                .await?;
             if !self.fence.is_valid() {
                 return Ok(outcome.with_fenced(true));
             }
@@ -278,7 +285,6 @@ impl ShardProcessor {
         let mut dirs: Vec<RowView> = Vec::new();
         for row in batch.rows {
             if row.file_type == FileTypeTag::Dir {
-                self.dir_restamp.push(row.clone());
                 dirs.push(row);
                 continue;
             }
@@ -316,56 +322,13 @@ impl ShardProcessor {
         let singletons = interleave_by_parent(singletons);
 
         // ---- Phase 1: dispatch non-dir work concurrently -------------
-        let mut joins: JoinSet<Vec<(RowView, MoveOutcome)>> = JoinSet::new();
-
-        for (_key, rows) in groups {
-            let mover = Arc::clone(&self.mover);
-            let inflight = self.inflight.clone();
-            let fence = self.fence.clone();
-            joins.spawn(async move { run_group(mover, inflight, fence, rows).await });
-        }
-
-        for row in singletons {
-            let mover = Arc::clone(&self.mover);
-            let inflight = self.inflight.clone();
-            let fence = self.fence.clone();
-            let live = Arc::clone(&self.live);
-            joins.spawn(async move {
-                if !fence.is_valid() {
-                    return Vec::new();
-                }
-                let _permit = inflight.acquire(row.size).await;
-                // Fence may have tripped while waiting for the inflight
-                // permit. Without rechecking here, all queued tasks
-                // would run to completion even after fence trip, since
-                // the pre-acquire check fired before they reached the
-                // semaphore.
-                if !fence.is_valid() {
-                    return Vec::new();
-                }
-                live.rows_started
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let outcome = mover.move_one(&row).await;
-                vec![(row, outcome)]
-            });
-        }
-
-        while let Some(joined) = joins.join_next().await {
-            match joined {
-                Ok(results) => {
-                    for (row, mo) in results {
-                        self.record(&row, mo, outcome);
-                    }
-                }
-                Err(e) => {
-                    // A spawned task panicked or was cancelled. Don't
-                    // panic the worker — log and keep collecting the
-                    // rest. Treat as a failure so the operator sees it.
-                    outcome.files_failed += 1;
-                    tracing::error!(error = ?e, "dispatched task join failed");
-                }
-            }
-        }
+        let jobs = groups
+            .into_values()
+            .map(Job::Group)
+            .chain(singletons.into_iter().map(Job::Row))
+            .map(Ok);
+        self.dispatch(jobs, usize::MAX, Phase::Rows, outcome)
+            .await?;
 
         // ---- Phase 2: dirs, deepest-first, level-parallel ------------
         //
@@ -396,42 +359,131 @@ impl ShardProcessor {
                 if !self.fence.is_valid() {
                     break;
                 }
-                let mut joins: JoinSet<Vec<(RowView, MoveOutcome)>> = JoinSet::new();
-                for row in level {
-                    let mover = Arc::clone(&self.mover);
-                    let inflight = self.inflight.clone();
-                    let fence = self.fence.clone();
-                    joins.spawn(async move {
-                        if !fence.is_valid() {
-                            return Vec::new();
-                        }
-                        let _permit = inflight.acquire(row.size).await;
-                        // Fence may have tripped while waiting for the
-                        // inflight permit; recheck before the mover op.
-                        if !fence.is_valid() {
-                            return Vec::new();
-                        }
-                        let mo = mover.move_one(&row).await;
-                        vec![(row, mo)]
-                    });
-                }
-                while let Some(joined) = joins.join_next().await {
-                    match joined {
-                        Ok(results) => {
-                            for (row, mo) in results {
-                                self.record(&row, mo, outcome);
-                            }
-                        }
-                        Err(e) => {
-                            outcome.files_failed += 1;
-                            tracing::error!(error = ?e, "dir task join failed");
-                        }
-                    }
-                }
+                let jobs = level.into_iter().map(Job::Row).map(Ok);
+                self.dispatch(jobs, usize::MAX, Phase::Dirs, outcome)
+                    .await?;
             }
         }
 
         Ok(())
+    }
+
+    /// Run `jobs`, each on its own task, with at most twice as many
+    /// tasks of a size class alive at once as the limiter has permits
+    /// for it: one set holding permits, one waiting to take each permit
+    /// as it is released. Spawning a task per row up front held one
+    /// for every row of a batch while a few hundred of them ran. Each
+    /// class has its own queue, so large files waiting for their few
+    /// permits never hold back the small files behind them. At most
+    /// `lookahead` jobs wait in the queues. A tripped fence or a
+    /// failing source starts nothing more; what is running finishes.
+    async fn dispatch(
+        &mut self,
+        jobs: impl Iterator<Item = anyhow::Result<Job>>,
+        lookahead: usize,
+        phase: Phase,
+        outcome: &mut ProcessOutcome,
+    ) -> anyhow::Result<()> {
+        let mut jobs = Some(jobs);
+        let mut failed = None;
+        let mut queued: [VecDeque<Job>; 3] = Default::default();
+        let mut running = [0usize; 3];
+        let mut class_of: HashMap<tokio::task::Id, usize> = HashMap::new();
+        let mut joins: JoinSet<Vec<(RowView, MoveOutcome)>> = JoinSet::new();
+        loop {
+            while let Some(source) = jobs.as_mut() {
+                if queued.iter().map(VecDeque::len).sum::<usize>() >= lookahead {
+                    break;
+                }
+                match source.next() {
+                    Some(Ok(job)) => queued[job.class() as usize].push_back(job),
+                    Some(Err(e)) => {
+                        // Let what is running finish, then report.
+                        failed = Some(e);
+                        jobs = None;
+                    }
+                    // Dropping the source frees whatever it still holds.
+                    None => jobs = None,
+                }
+            }
+            if !self.fence.is_valid() || failed.is_some() {
+                jobs = None;
+                queued.iter_mut().for_each(VecDeque::clear);
+            }
+            for (c, class) in CLASSES.into_iter().enumerate() {
+                while running[c] < 2 * self.inflight.permits(class) {
+                    let Some(job) = queued[c].pop_front() else {
+                        break;
+                    };
+                    let task = self.spawn_job(&mut joins, job, phase);
+                    class_of.insert(task.id(), c);
+                    running[c] += 1;
+                }
+            }
+            let Some(joined) = joins.join_next_with_id().await else {
+                break;
+            };
+            let id = match &joined {
+                Ok((id, _)) => *id,
+                Err(e) => e.id(),
+            };
+            if let Some(c) = class_of.remove(&id) {
+                running[c] -= 1;
+            }
+            match joined {
+                Ok((_, results)) => {
+                    for (row, mo) in results {
+                        if phase != Phase::Restamp || mo.result.is_err() {
+                            self.record(&row, mo, outcome);
+                        }
+                    }
+                }
+                Err(e) => {
+                    // A spawned task panicked or was cancelled. Don't
+                    // panic the worker — log and keep collecting the
+                    // rest. Treat as a failure so the operator sees it.
+                    outcome.files_failed += 1;
+                    tracing::error!(error = ?e, ?phase, "dispatched task join failed");
+                }
+            }
+        }
+        failed.map_or(Ok(()), Err)
+    }
+
+    fn spawn_job(
+        &self,
+        joins: &mut JoinSet<Vec<(RowView, MoveOutcome)>>,
+        job: Job,
+        phase: Phase,
+    ) -> AbortHandle {
+        let mover = Arc::clone(&self.mover);
+        let inflight = self.inflight.clone();
+        let fence = self.fence.clone();
+        let row = match job {
+            Job::Group(rows) => return joins.spawn(run_group(mover, inflight, fence, rows)),
+            Job::Row(row) => row,
+        };
+        let live = (phase == Phase::Rows).then(|| Arc::clone(&self.live));
+        joins.spawn(async move {
+            if !fence.is_valid() {
+                return Vec::new();
+            }
+            let _permit = inflight.acquire(row.size).await;
+            // Fence may have tripped while waiting for the inflight
+            // permit. Without rechecking here, all queued tasks would
+            // run to completion even after fence trip, since the
+            // pre-acquire check fired before they reached the
+            // semaphore.
+            if !fence.is_valid() {
+                return Vec::new();
+            }
+            if let Some(live) = live {
+                live.rows_started
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            let mo = mover.move_one(&row).await;
+            vec![(row, mo)]
+        })
     }
 
     fn maybe_emit_fsid_ungrouped_warning(&mut self, row: &RowView) {
@@ -1013,5 +1065,179 @@ mod tests {
         assert_eq!(outcome.files_ok, 1, "torn still counts as copied");
         assert_eq!(outcome.files_failed, 0, "torn is NOT a failure");
         assert!(sink.is_empty(), "torn must not land in the failures sink");
+    }
+
+    // ---- dispatch -------------------------------------------------
+
+    /// Succeeds at once for small rows; a large row waits until every
+    /// small row is done. `fail` names a path that fails.
+    struct Gated {
+        downgrades: migration_mover::DowngradeSink,
+        smalls: usize,
+        small_done: std::sync::atomic::AtomicUsize,
+        calls: std::sync::atomic::AtomicUsize,
+        fail: Option<&'static [u8]>,
+    }
+
+    #[async_trait::async_trait]
+    impl FileMover for Gated {
+        async fn move_one(&self, row: &RowView) -> MoveOutcome {
+            use std::sync::atomic::Ordering::SeqCst;
+            self.calls.fetch_add(1, SeqCst);
+            if SizeClass::classify(row.size) == SizeClass::Large {
+                while self.small_done.load(SeqCst) < self.smalls {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+            } else {
+                self.small_done.fetch_add(1, SeqCst);
+            }
+            let result = match self.fail {
+                Some(path) if path == row.path.as_slice() => {
+                    Err(MoveError::new(FailurePhase::Write, "EIO"))
+                }
+                _ => Ok(()),
+            };
+            MoveOutcome {
+                row_id: row.row_id,
+                strategy: Strategy::LibnfsIoUring,
+                bytes_moved: row.size,
+                torn: false,
+                result,
+            }
+        }
+
+        async fn move_hardlink(&self, row: &RowView, _target: &[u8]) -> MoveOutcome {
+            self.move_one(row).await
+        }
+
+        fn downgrade_sink(&self) -> &migration_mover::DowngradeSink {
+            &self.downgrades
+        }
+    }
+
+    fn processor(mover: Arc<Gated>) -> ShardProcessor {
+        ShardProcessor {
+            mover,
+            live: Arc::new(crate::heartbeat::LivePending::default()),
+            fence: Fence::new(),
+            budget: BatchBudget::default(),
+            inflight: InflightLimiter::new(&migration_mover::batch::InflightProfile {
+                small: 2,
+                medium: 1,
+                large: 1,
+                ..Default::default()
+            }),
+            failures: FailureSink::new(),
+            throughput: ThroughputCounter::new(),
+            fsid_ungrouped_warned: false,
+            emitter: crate::events::EventEmitter::disabled(),
+            run_control: None,
+            stop: CancellationToken::new(),
+        }
+    }
+
+    fn gated(smalls: usize, fail: Option<&'static [u8]>) -> Arc<Gated> {
+        Arc::new(Gated {
+            downgrades: migration_mover::DowngradeSink::new(),
+            smalls,
+            small_done: Default::default(),
+            calls: Default::default(),
+            fail,
+        })
+    }
+
+    /// Rows `[from, to)`, each of `size` bytes.
+    fn sized_rows(from: u64, to: u64, size: u64) -> Vec<Job> {
+        (from..to)
+            .map(|i| {
+                let mut r = row(None, None, None);
+                r.row_id = i;
+                r.path = format!("/data/f{i}").into_bytes();
+                r.size = size;
+                Job::Row(r)
+            })
+            .collect()
+    }
+
+    /// Eight large files come first, and each waits until the small
+    /// files behind them are done. With one queue for all classes,
+    /// the large ones fill every slot and nothing moves.
+    #[tokio::test]
+    async fn large_files_waiting_never_hold_back_small_ones() {
+        let mover = gated(8, None);
+        let mut p = processor(Arc::clone(&mover));
+        let mut jobs = sized_rows(0, 8, 2 << 30);
+        jobs.extend(sized_rows(8, 16, 100));
+        let mut outcome = ProcessOutcome::default();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            p.dispatch(
+                jobs.into_iter().map(Ok),
+                usize::MAX,
+                Phase::Rows,
+                &mut outcome,
+            ),
+        )
+        .await
+        .expect("the small files ran past the waiting large ones")
+        .unwrap();
+        assert_eq!(outcome.files_ok, 16);
+        assert_eq!(
+            p.live
+                .rows_started
+                .load(std::sync::atomic::Ordering::SeqCst),
+            16
+        );
+    }
+
+    #[tokio::test]
+    async fn the_restamp_records_only_failures() {
+        let mover = gated(0, Some(b"/data/f3"));
+        let mut p = processor(Arc::clone(&mover));
+        let mut outcome = ProcessOutcome::default();
+        let jobs = sized_rows(0, 10, 4096).into_iter().map(Ok);
+        p.dispatch(jobs, 4, Phase::Restamp, &mut outcome)
+            .await
+            .unwrap();
+        assert_eq!(mover.calls.load(std::sync::atomic::Ordering::SeqCst), 10);
+        assert_eq!(outcome.files_ok, 0, "counted when their batch ran");
+        assert_eq!(outcome.files_failed, 1);
+        assert_eq!(p.failures.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_tripped_fence_starts_nothing_more() {
+        let mover = gated(0, None);
+        let mut p = processor(Arc::clone(&mover));
+        p.fence.trip("test");
+        let mut outcome = ProcessOutcome::default();
+        let jobs = sized_rows(0, 10, 100).into_iter().map(Ok);
+        p.dispatch(jobs, usize::MAX, Phase::Rows, &mut outcome)
+            .await
+            .unwrap();
+        assert_eq!(mover.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(outcome.rows_processed(), 0);
+    }
+
+    /// A source that fails starts nothing more: the two rows running
+    /// when it fails finish, the one queued behind them never starts,
+    /// and the error is reported.
+    #[tokio::test]
+    async fn a_failing_source_drains_then_reports() {
+        let mover = gated(0, None);
+        let mut p = processor(Arc::clone(&mover));
+        let mut outcome = ProcessOutcome::default();
+        let jobs = sized_rows(0, 3, 100)
+            .into_iter()
+            .map(Ok)
+            .chain(std::iter::once(Err(anyhow::anyhow!("torn shard"))))
+            .chain(sized_rows(3, 6, 100).into_iter().map(Ok));
+        let err = p
+            .dispatch(jobs, 2, Phase::Rows, &mut outcome)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("torn shard"), "{err:#}");
+        assert_eq!(mover.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(outcome.files_ok, 2);
     }
 }

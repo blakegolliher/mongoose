@@ -2,7 +2,10 @@
 //! mover when it has to drop a metadata attribute the user asked for
 //! (null mtime, null owner, fsid fallback). The orchestrator owns the
 //! sink, updates the current shard name when it claims one, and
-//! flushes drained JSONL to S3 at shard completion.
+//! flushes drained JSONL to S3 at shard completion. `mongoose copy`
+//! instead spills each shard's records to a local file as they arrive
+//! (`spill_to`): a shard can have one per row, and none are held in
+//! memory.
 //!
 //! Lives in the mover crate because the mover is the producer; the
 //! orchestrator wires it into the rest of the system. Records use
@@ -14,9 +17,11 @@
 //! single-row, and even at M3 concurrency the per-row append is a
 //! single push.
 
+use crate::spill::{Spill, Spilled};
 use base64::Engine;
 use migration_core::records::{DowngradeKind, DowngradeRecord};
 use migration_core::time::UtcTime;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
@@ -26,6 +31,9 @@ struct Inner {
     /// the per-row dispatch path.
     shard: String,
     records: Vec<DowngradeRecord>,
+    /// Set between `spill_to` and `finish_spill`: records go to this
+    /// file instead of `records`.
+    spill: Option<Spill>,
 }
 
 /// Cheap-clone collector of downgrade records.
@@ -56,22 +64,58 @@ impl DowngradeSink {
         };
         let path_b64 = base64::engine::general_purpose::STANDARD.encode(path);
         let shard = g.shard.clone();
-        g.records.push(DowngradeRecord {
+        let record = DowngradeRecord {
             row_id,
             shard,
             path_b64,
             downgrade: kind,
             ts: UtcTime::now(),
-        });
+        };
+        match g.spill.as_mut() {
+            Some(spill) => spill.push(|out| serde_json::to_writer(out, &record)),
+            None => g.records.push(record),
+        }
     }
 
     /// Number of buffered records (observability + tests).
     pub fn len(&self) -> usize {
-        self.inner.lock().map(|g| g.records.len()).unwrap_or(0)
+        self.inner
+            .lock()
+            .map(|g| g.records.len() + g.spill.as_ref().map_or(0, |s| s.records() as usize))
+            .unwrap_or(0)
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// From now on, write each record to `path` (created or
+    /// truncated) as it arrives instead of holding it, until
+    /// [`Self::finish_spill`]. Records already held are written first.
+    pub fn spill_to(&self, path: &Path) -> std::io::Result<()> {
+        let mut spill = Spill::create(path)?;
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| std::io::Error::other("downgrade sink lock poisoned"))?;
+        for record in g.records.drain(..) {
+            spill.push(|out| serde_json::to_writer(out, &record));
+        }
+        g.spill = Some(spill);
+        Ok(())
+    }
+
+    /// Stop spilling: flush and sync the file, and say what it holds.
+    /// `None` when no spill was in progress. A write that failed while
+    /// spilling is reported here.
+    pub fn finish_spill(&self) -> std::io::Result<Option<Spilled>> {
+        let spill = self
+            .inner
+            .lock()
+            .map_err(|_| std::io::Error::other("downgrade sink lock poisoned"))?
+            .spill
+            .take();
+        spill.map(Spill::finish).transpose()
     }
 
     /// Drain all buffered records into a JSONL byte buffer suitable
@@ -126,6 +170,30 @@ mod tests {
             .decode(&r0.path_b64)
             .unwrap();
         assert_eq!(decoded, b"/foo/bar");
+    }
+
+    #[test]
+    fn spilled_records_go_to_the_file_in_order() {
+        let path =
+            std::env::temp_dir().join(format!("downgrade-spill-{}.jsonl", std::process::id()));
+        let sink = DowngradeSink::new();
+        sink.set_current_shard("part-0001.parquet");
+        sink.record(1, b"/held", DowngradeKind::NullOwner);
+        sink.spill_to(&path).unwrap();
+        sink.record(2, b"/spilled", DowngradeKind::NullMtime);
+        assert_eq!(sink.len(), 2);
+        assert!(sink.drain_jsonl().is_empty(), "nothing is held in memory");
+        let spilled = sink.finish_spill().unwrap().unwrap();
+        assert_eq!(spilled.records, 2);
+        let body = std::fs::read_to_string(&spilled.path).unwrap();
+        let rows: Vec<DowngradeRecord> = body
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(rows.iter().map(|r| r.row_id).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(rows[1].downgrade, DowngradeKind::NullMtime);
+        assert_eq!(rows[1].shard, "part-0001.parquet");
+        std::fs::remove_file(&spilled.path).unwrap();
     }
 
     #[test]

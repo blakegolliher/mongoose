@@ -5,9 +5,10 @@ fixed budgets), never on the size of the tree. Every structure that grows
 with the number of entries is to be streamed, spilled to disk, or capped by a
 budget, with correct behavior when something is evicted.
 
-**Status (2026-10-16):** the walker scan is bounded (nfs-walker `f6f7572`,
-mongoose PR #26). Step 1 is closed with no change, steps 2 to 4 merged
-(PRs #31 to #33), and step 6 is in this change. Steps 5, 7 and 8 are open.
+**Status (2026-10-17):** the walker scan is bounded (nfs-walker `f6f7572`,
+mongoose PR #26). Step 1 is closed with no change, steps 2 to 4 and 6
+merged (PRs #31 to #34), and step 5 is in this change. Steps 7 and 8 are
+open.
 
 ## What grows with tree size
 
@@ -110,13 +111,58 @@ Fixed but large: each copy micro-batch spawns all of its rows at once, at
 
    The directory-heavy tree also showed two more consumers that grow with
    directories (steps 6 and 7).
-5. **Smaller items:**
-   - a bounded reorder window for the content read-back;
-   - re-reading directory rows from the shard file at re-stamp time instead
-     of holding them;
-   - filtering records while reading them in the pending-set load;
-   - writing the failure and downgrade logs incrementally;
-   - spawning micro-batch rows lazily.
+5. **Smaller items.** Each is now bounded by the concurrency or a fixed
+   budget:
+   - **Content read-back (row 5):** each result is recorded when it
+     completes. The checkpoint lists the entries still running, at most the
+     concurrency, and every other entry below the last one started is done.
+     A slow file no longer holds a result for every entry checked while it
+     is read. `mismatches.jsonl` is now in completion order.
+   - **Directory re-stamp (row 6):** the shard-end re-stamp reads the
+     directory rows back from the shard file instead of holding a copy of
+     each.
+   - **Pending set (row 7):** records are parsed one line at a time, and
+     only failures and torn copies are kept.
+   - **Failure and downgrade logs:** `mongoose copy` spills each shard's
+     records to a hidden `.partial` file as they arrive, then renames it
+     into place before the shard is marked complete.
+   - **Task spawning:** tasks start per size class as permits free, with up
+     to one waiting task per permit, instead of one per row up front. Each
+     class has its own queue, so large files waiting for permits do not
+     hold back small ones.
+
+   One 2,004,879-row shard went through the shard processor and the copy
+   loop's result persistence, with no NFS. The mover took 1 ms per row and
+   recorded a downgrade for every file:
+
+   | Shard | Peak before | Peak after | Time before | Time after |
+   |---|---|---|---|---|
+   | All files | 1,171–1,175 MB | 51–53 MB | 25.6–26.8 s | 27.0–27.3 s |
+   | Half of its rows directories | 1,319 MB | 136–148 MB | 34.7 s | 34.6–36.4 s |
+
+   - **Records:** the same apart from their timestamps.
+   - **Time:** about 5% more on the all-files shard, because the 527 MB of
+     records are written while the shard runs. This mover is about 45 times
+     faster than a real copy.
+   - **Lazy spawning:** inside a batch it saves only about 7 MB per 100,000
+     rows, far less than the 100–130 MB estimated above. It matters for the
+     re-stamp, which spawned a task for every directory of the shard: with
+     every task spawned up front, the directory-heavy shard still peaked at
+     1,105 MB.
+
+   On var204, portable builds of `main` and of this change, one after the
+   other:
+
+   | Workload | Before | After |
+   |---|---|---|
+   | No-op `sync` of the 2M-entry tree | 648 MB, 31.2 s | 645 MB, 30.2 s |
+   | Copy of `/source/web` (115,370 files, 58.6 GB) | 213 MB, 1:15.6 (copy phase 58 s) | 217 MB, 1:21.5 (copy phase 59 s) |
+   | That copy's cutover | 321 MB, 1:47.8 | 289 MB, 1:48.1 |
+
+   These trees have few directories and no downgrades, so little changes
+   here. The copy's extra 6 s is in the scan and address discovery; the copy
+   phase ran at 950 and 952 MB/s. Both cutovers read back 115,086 files and
+   found no mismatch.
 6. **The walker's pending-directory queue.** nfs-walker `0e9b795` makes each
    worker's own queue LIFO. The scan used to go breadth first, and most of
    the tree's widest level waited in the queues at once. Now it goes depth

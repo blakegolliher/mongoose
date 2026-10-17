@@ -66,6 +66,8 @@ verification advances the baseline.
   downgrades/part-NNNN.jsonl    per-file metadata downgrades, per shard, and
                                 one SPECIAL_NOT_COPIED record for every fifo,
                                 socket, or device node that was not copied
+                                (while a shard runs, its records go to a
+                                hidden .part-NNNN.jsonl.partial beside these)
   baseline.json                 which pass the next sync diffs against
   passes/pass-NNNN/             one sync pass: same layout as above, plus
     classify/                   keep lists, deleted.jsonl, classify.json

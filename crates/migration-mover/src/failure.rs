@@ -6,13 +6,17 @@
 //! The processor records on Err from the mover; the orchestrator
 //! drains and PUTs to `failures/host-<id>/<shard-stem>-e<epoch>.jsonl`
 //! (one object per shard flush — see `layout::failures_flush_key`)
-//! after each shard.
+//! after each shard. `mongoose copy` instead spills each shard's
+//! records to a local file as they arrive (`spill_to`), so none are
+//! held in memory.
 //! Intentionally not behind a trait — there's only one production
 //! impl, and tests inspect the buffered records directly.
 
+use crate::spill::{Spill, Spilled};
 use base64::Engine;
 use migration_core::records::{FailurePhase, FailureRecord};
 use migration_core::time::UtcTime;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
@@ -22,6 +26,9 @@ struct Inner {
     /// the per-row dispatch path.
     shard: String,
     records: Vec<FailureRecord>,
+    /// Set between `spill_to` and `finish_spill`: records go to this
+    /// file instead of `records`.
+    spill: Option<Spill>,
 }
 
 #[derive(Clone, Default)]
@@ -47,22 +54,58 @@ impl FailureSink {
         };
         let path_b64 = base64::engine::general_purpose::STANDARD.encode(path);
         let shard = g.shard.clone();
-        g.records.push(FailureRecord {
+        let record = FailureRecord {
             row_id,
             shard,
             path_b64,
             error: error.into(),
             phase,
             ts: UtcTime::now(),
-        });
+        };
+        match g.spill.as_mut() {
+            Some(spill) => spill.push(|out| serde_json::to_writer(out, &record)),
+            None => g.records.push(record),
+        }
     }
 
     pub fn len(&self) -> usize {
-        self.inner.lock().map(|g| g.records.len()).unwrap_or(0)
+        self.inner
+            .lock()
+            .map(|g| g.records.len() + g.spill.as_ref().map_or(0, |s| s.records() as usize))
+            .unwrap_or(0)
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// From now on, write each record to `path` (created or
+    /// truncated) as it arrives instead of holding it, until
+    /// [`Self::finish_spill`]. Records already held are written first.
+    pub fn spill_to(&self, path: &Path) -> std::io::Result<()> {
+        let mut spill = Spill::create(path)?;
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| std::io::Error::other("failure sink lock poisoned"))?;
+        for record in g.records.drain(..) {
+            spill.push(|out| serde_json::to_writer(out, &record));
+        }
+        g.spill = Some(spill);
+        Ok(())
+    }
+
+    /// Stop spilling: flush and sync the file, and say what it holds.
+    /// `None` when no spill was in progress. A write that failed while
+    /// spilling is reported here.
+    pub fn finish_spill(&self) -> std::io::Result<Option<Spilled>> {
+        let spill = self
+            .inner
+            .lock()
+            .map_err(|_| std::io::Error::other("failure sink lock poisoned"))?
+            .spill
+            .take();
+        spill.map(Spill::finish).transpose()
     }
 
     pub fn drain_jsonl(&self) -> Vec<u8> {
@@ -116,6 +159,32 @@ mod tests {
             .decode(&r0.path_b64)
             .unwrap();
         assert_eq!(decoded, b"/etc/passwd");
+    }
+
+    #[test]
+    fn spilled_records_go_to_the_file_in_order() {
+        let path = std::env::temp_dir().join(format!("failure-spill-{}.jsonl", std::process::id()));
+        let sink = FailureSink::new();
+        sink.set_current_shard("part-0001.parquet");
+        sink.record(1, b"/held", FailurePhase::Open, "EACCES");
+        sink.spill_to(&path).unwrap();
+        sink.record(2, b"/spilled", FailurePhase::Write, "ENOSPC");
+        assert_eq!(sink.len(), 2);
+        assert!(sink.drain_jsonl().is_empty(), "nothing is held in memory");
+        let spilled = sink.finish_spill().unwrap().unwrap();
+        assert_eq!(spilled.records, 2);
+        let body = std::fs::read_to_string(&spilled.path).unwrap();
+        let rows: Vec<FailureRecord> = body
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(rows.iter().map(|r| r.row_id).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(rows[1].error, "ENOSPC");
+        // After the spill, records are held again.
+        assert_eq!(sink.finish_spill().unwrap(), None);
+        sink.record(3, b"/after", FailurePhase::Open, "EIO");
+        assert_eq!(sink.len(), 1);
+        std::fs::remove_file(&spilled.path).unwrap();
     }
 
     #[test]

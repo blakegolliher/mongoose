@@ -4,6 +4,7 @@
 use crate::util::{read_json_opt, utc_now, write_json_atomic};
 use crate::workdir::WorkDir;
 use anyhow::{Context, Result};
+use migration_mover::Spilled;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -120,18 +121,7 @@ fn write_shard_jsonl_with(
 ) -> Result<Option<PathBuf>> {
     let path = dir.join(format!("{stem}.jsonl"));
     if body.is_empty() {
-        before(ResultFileStep::Remove)?;
-        match std::fs::remove_file(&path) {
-            Ok(()) => {
-                before(ResultFileStep::ParentSync)?;
-                std::fs::File::open(dir)
-                    .with_context(|| format!("opening result directory {}", dir.display()))?
-                    .sync_all()
-                    .with_context(|| format!("syncing result directory {}", dir.display()))?;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e).with_context(|| format!("removing stale {}", path.display())),
-        }
+        remove_stale(dir, &path, &mut before)?;
         return Ok(None);
     }
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -139,15 +129,79 @@ fn write_shard_jsonl_with(
     Ok(Some(path))
 }
 
+/// Remove `path`, a result file from an earlier attempt of the shard,
+/// and sync `dir` if there was one.
+fn remove_stale(
+    dir: &Path,
+    path: &Path,
+    before: &mut impl FnMut(ResultFileStep) -> std::io::Result<()>,
+) -> Result<()> {
+    before(ResultFileStep::Remove)?;
+    match std::fs::remove_file(path) {
+        Ok(()) => {
+            before(ResultFileStep::ParentSync)?;
+            sync_dir(dir)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("removing stale {}", path.display())),
+    }
+}
+
+fn sync_dir(dir: &Path) -> Result<()> {
+    std::fs::File::open(dir)
+        .with_context(|| format!("opening result directory {}", dir.display()))?
+        .sync_all()
+        .with_context(|| format!("syncing result directory {}", dir.display()))
+}
+
+/// Where a shard's records of one kind are spilled while it runs: a
+/// hidden `.partial` file in `dir`, which readers of `<stem>.jsonl`
+/// files skip. Creates `dir`.
+pub fn spill_path(dir: &Path, stem: &str) -> Result<PathBuf> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    Ok(dir.join(format!(".{stem}.jsonl.partial")))
+}
+
+/// Put one shard's spilled records (synced by `finish_spill`) in place
+/// as `<dir>/<stem>.jsonl`, the counterpart of [`write_shard_jsonl`]
+/// for a sink that spilled. With no records, the empty spill file and
+/// any stale result file are removed. Returns the path written, or
+/// `None` when there was nothing.
+pub fn place_shard_jsonl(
+    dir: &Path,
+    stem: &str,
+    spilled: Option<Spilled>,
+) -> Result<Option<PathBuf>> {
+    let path = dir.join(format!("{stem}.jsonl"));
+    match spilled {
+        Some(s) if s.records > 0 => {
+            std::fs::rename(&s.path, &path)
+                .with_context(|| format!("renaming {} -> {}", s.path.display(), path.display()))?;
+            sync_dir(dir)?;
+            Ok(Some(path))
+        }
+        empty => {
+            if let Some(s) = empty {
+                std::fs::remove_file(&s.path)
+                    .with_context(|| format!("removing {}", s.path.display()))?;
+            }
+            remove_stale(dir, &path, &mut |_| Ok(()))?;
+            Ok(None)
+        }
+    }
+}
+
 /// Persist both result streams before invoking the closure that commits
 /// shard completion to progress. A persistence error never runs `commit`.
-pub fn persist_shard_results_then<T>(
+/// `B` is a drained body ([`write_shard_jsonl`]) or a spill
+/// ([`place_shard_jsonl`]).
+pub fn persist_shard_results_then<B, T>(
     failures_dir: &Path,
     downgrades_dir: &Path,
     stem: &str,
-    failures: &[u8],
-    downgrades: &[u8],
-    mut write: impl FnMut(&Path, &str, &[u8]) -> Result<Option<PathBuf>>,
+    failures: B,
+    downgrades: B,
+    mut write: impl FnMut(&Path, &str, B) -> Result<Option<PathBuf>>,
     commit: impl FnOnce() -> Result<T>,
 ) -> Result<(Option<PathBuf>, Option<PathBuf>, T)> {
     let failure_path = write(failures_dir, stem, failures)?;
@@ -269,6 +323,47 @@ mod tests {
     }
 
     #[test]
+    fn a_spill_is_placed_or_removed_with_any_stale_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink_dir = dir.path().join("downgrades");
+        let spill = spill_path(&sink_dir, "part-0000").unwrap();
+        let path = sink_dir.join("part-0000.jsonl");
+
+        // Records: the spill becomes the result file.
+        std::fs::write(&spill, b"{\"row_id\":1}\n").unwrap();
+        let spilled = Spilled {
+            path: spill.clone(),
+            records: 1,
+        };
+        assert_eq!(
+            place_shard_jsonl(&sink_dir, "part-0000", Some(spilled)).unwrap(),
+            Some(path.clone())
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"{\"row_id\":1}\n");
+        assert!(!spill.exists());
+
+        // A later attempt with no records removes both files.
+        std::fs::write(&spill, b"").unwrap();
+        let empty = Spilled {
+            path: spill.clone(),
+            records: 0,
+        };
+        assert_eq!(
+            place_shard_jsonl(&sink_dir, "part-0000", Some(empty)).unwrap(),
+            None
+        );
+        assert!(!spill.exists() && !path.exists());
+
+        // No spill at all still clears a stale result.
+        std::fs::write(&path, b"old\n").unwrap();
+        assert_eq!(
+            place_shard_jsonl(&sink_dir, "part-0000", None).unwrap(),
+            None
+        );
+        assert_eq!(std::fs::read_dir(&sink_dir).unwrap().count(), 0);
+    }
+
+    #[test]
     fn stale_result_removal_and_parent_sync() {
         let dir = tempfile::tempdir().unwrap();
         let sink_dir = dir.path().join("failures");
@@ -307,8 +402,8 @@ mod tests {
             &wd.failures_dir(),
             &wd.downgrades_dir(),
             "part-0000",
-            b"",
-            b"",
+            b"".as_slice(),
+            b"".as_slice(),
             |target_dir, stem, body| {
                 if target_dir == wd.failures_dir() {
                     write_shard_jsonl_with(target_dir, stem, body, |step| {
@@ -347,8 +442,8 @@ mod tests {
             &wd.failures_dir(),
             &wd.downgrades_dir(),
             "part-0000",
-            b"failure\n",
-            b"",
+            b"failure\n".as_slice(),
+            b"".as_slice(),
             write_shard_jsonl,
             || {
                 assert_eq!(
@@ -378,8 +473,8 @@ mod tests {
             &wd.failures_dir(),
             &wd.downgrades_dir(),
             "part-0000",
-            b"failure\n",
-            b"downgrade\n",
+            b"failure\n".as_slice(),
+            b"downgrade\n".as_slice(),
             |target_dir, stem, body| {
                 if target_dir == wd.downgrades_dir() {
                     anyhow::bail!("injected rename/sync failure")
