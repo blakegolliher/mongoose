@@ -6,9 +6,8 @@ with the number of entries is to be streamed, spilled to disk, or capped by a
 budget, with correct behavior when something is evicted.
 
 **Status (2026-10-17):** the walker scan is bounded (nfs-walker `f6f7572`,
-mongoose PR #26). Step 1 is closed with no change, steps 2 to 4 and 6
-merged (PRs #31 to #34), and step 5 is in this change. Steps 7 and 8 are
-open.
+mongoose PR #26). Step 1 is closed with no change, steps 2 to 6 merged
+(PRs #31 to #35), and step 8 is in this change. Step 7 is open.
 
 ## What grows with tree size
 
@@ -150,8 +149,8 @@ Fixed but large: each copy micro-batch spawns all of its rows at once, at
      every task spawned up front, the directory-heavy shard still peaked at
      1,105 MB.
 
-   On var204, portable builds of `main` and of this change, one after the
-   other:
+   On var204, portable builds of `main` before and after this step, one
+   after the other:
 
    | Workload | Before | After |
    |---|---|---|
@@ -188,9 +187,47 @@ Fixed but large: each copy micro-batch spawns all of its rows at once, at
 7. **The READDIRPLUS child cache's evicted set** (`DirChildrenState`): it
    is capped at 1,000,000 paths, about 45 MB on this tree and up to about
    150 MB.
-8. **Regression guard.** A test pushes a synthetic index of several million
-   rows through rewrite, classify and namespace verification, and fails if
-   peak memory crosses a fixed ceiling. It needs no NFS.
+8. **Regression guard.** `crates/mongoose/tests/memory_ceiling.rs` runs
+   with the rest of `cargo test` and needs no NFS. The tree is synthetic:
+   2,001,000 entries, half of them directories, written by the walker's
+   own row builder. It goes through these phases:
+   - the rewrite and the manifest build;
+   - sync's classify;
+   - the cutover's namespace join, then its read-back with one slow file;
+   - the copy of its one shard, with a downgrade for every file;
+   - the load of sync's pending set from those downgrades.
 
-The target after steps 1–8 is about 1–1.5 GB peak for any tree size. That is
-an estimate, to be confirmed by the step 8 measurements.
+   The joins use one bucket, so it holds what a 500M-entry tree puts in
+   each of 256. A counting allocator measures each phase's peak heap above
+   what it started with, and each must stay under its ceiling.
+
+   The same test on `main` before steps 2 and 3 (`9604640`) and before
+   step 5 (`a062d9d`):
+
+   | Phase | Before steps 2–3 | Before step 5 | Now | Ceiling |
+   |---|---|---|---|---|
+   | Index | 927 MB | 88 MB | 88 MB | 192 MB |
+   | Classify | 595 MB | 74 MB | 74 MB | 160 MB |
+   | Namespace | 753 MB | 86 MB | 86 MB | 256 MB |
+   | Content | 267 MB | 267 MB | under 0.1 MB | 32 MB |
+   | Copy | 1,219 MB | 1,219 MB | 52 MB | 128 MB |
+   | Pending | 394 MB | 394 MB | under 0.1 MB | 32 MB |
+
+   - **Heap, not RSS:** the count is exact and the same on every run. It
+     leaves out what glibc keeps after a free (step 1). The whole test
+     peaks at 216 MB RSS, against 1,395 MB before step 5 and 1,661 MB
+     before steps 2 and 3.
+   - **Namespace ceiling:** it has more room because its map doubles as
+     it fills, and where the last doubling falls depends on the entries'
+     sizes. A more compressible version of the tree peaked at 170 MB.
+   - **Not covered:** the walker scan and the mover's directory caches
+     need an NFS server. The caches (step 4) and the walker's queue
+     (step 6) have tests of their own.
+   - **Cost:** about a minute, the same on four cores as on eight, and the
+     peaks were identical on both.
+
+The target after steps 1–8 is about 1–1.5 GB peak for any tree size. The
+phases above stay under their ceilings, a no-op sync of the 2M-file tree
+peaked at about 640 MB with its scan, and the directory caches stop at
+about 280 MB. A run on a much larger tree is still needed to confirm the
+total.
