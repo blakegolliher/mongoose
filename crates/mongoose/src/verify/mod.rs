@@ -47,8 +47,8 @@
 //!    be read. Cheap (metadata only, local disk).
 //! 2. [`content`]: for every work-list entry, hash the file on both
 //!    servers (or readlink both sides) and compare. Expensive — it
-//!    reads the whole tree twice — and resumable at a durable
-//!    frontier, so an interrupted cutover picks up where it stopped.
+//!    reads the whole tree twice — and resumable from a durable
+//!    checkpoint, so an interrupted cutover picks up where it stopped.
 //! 3. The report: `verify.json` with counts, the contract in force, a
 //!    bounded sample of mismatches, and the path of the full
 //!    `verify/mismatches.jsonl`.

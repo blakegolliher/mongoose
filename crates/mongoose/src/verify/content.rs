@@ -3,13 +3,17 @@
 //! symlink on both sides and compare the target bytes.
 //!
 //! The work list (`content-todo.bin`, written by the namespace phase)
-//! is processed in order with bounded concurrency. Completion is
-//! tracked as a **frontier**: every entry below it is done, its
-//! mismatch (if any) appended to `mismatches.jsonl`, and both are
-//! durable before `content-progress.json` records the new frontier.
-//! A resumed run truncates the mismatch file back to the recorded
-//! length and continues from the frontier, so an interrupted cutover
-//! never re-reads finished files and never duplicates a record.
+//! is read in order with bounded concurrency, and each result is
+//! recorded as it completes: its mismatch (if any) appended to
+//! `mismatches.jsonl`, in completion order. `content-progress.json`
+//! records which entries are done: all of them below the last one
+//! started, except the few still running, which are listed. The
+//! mismatch file is durable before the checkpoint that vouches for
+//! it. A resumed run truncates the mismatch file back to the recorded
+//! length, skips the done entries and reads the listed ones again, so
+//! an interrupted cutover never re-reads finished files and never
+//! duplicates a record. Nothing is held for a finished entry, so a
+//! slow file does not make memory grow while the others finish.
 //!
 //! The libnfs implementation ([`LibnfsChecker`]) holds one
 //! source/destination context pair per entry and hashes the two sides
@@ -27,7 +31,7 @@ use migration_mover::join_root;
 use migration_mover::libnfs::{ops, LibnfsContextPool, MultiPool, NfsContext};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -90,7 +94,16 @@ struct ContentProgress {
     complete: bool,
     /// Entries `[0, frontier)` of the work list are done and recorded.
     frontier: u64,
-    /// Length of `mismatches.jsonl` covering exactly those entries.
+    /// Entries `[frontier, issued)` are done and recorded too, except
+    /// those in `unfinished`. A checkpoint written before these two
+    /// fields existed has neither, and its frontier says it all.
+    #[serde(default)]
+    issued: u64,
+    /// Entries that were running at the checkpoint, at most the
+    /// concurrency. A resumed run reads them again.
+    #[serde(default)]
+    unfinished: Vec<u64>,
+    /// Length of `mismatches.jsonl` covering exactly the done entries.
     mismatch_file_len: u64,
     counts: ContentCounts,
 }
@@ -218,6 +231,8 @@ pub async fn run(
         None => ContentProgress {
             complete: false,
             frontier: 0,
+            issued: 0,
+            unfinished: Vec::new(),
             mismatch_file_len: initial_mismatch_len,
             counts: ContentCounts::default(),
         },
@@ -270,7 +285,11 @@ pub async fn run(
 
     let concurrency = concurrency.max(1);
     let mut inflight: JoinSet<(u64, TodoKind, CheckResult)> = JoinSet::new();
-    let mut finished: BTreeMap<u64, (TodoKind, CheckResult)> = BTreeMap::new();
+    // Entries the checkpoint must not count as done: those running
+    // now, and those listed by the checkpoint this run resumed from
+    // until they are read again.
+    let issued = progress.issued.max(progress.frontier);
+    let mut unfinished: BTreeSet<u64> = progress.unfinished.iter().copied().collect();
     let mut next_idx = progress.frontier;
     let mut exhausted = false;
     let mut last_checkpoint = Instant::now();
@@ -282,12 +301,21 @@ pub async fn run(
                     let entry = entry?;
                     let idx = next_idx;
                     next_idx += 1;
+                    if idx < issued && !unfinished.contains(&idx) {
+                        continue; // done before the restart
+                    }
+                    unfinished.insert(idx);
                     let checker = Arc::clone(&checker);
                     inflight.spawn(async move {
                         let r = checker.check(&entry).await;
                         (idx, entry.kind, r)
                     });
                 }
+                None if next_idx < issued => anyhow::bail!(
+                    "the content work list is shorter than the recorded checkpoint ({issued} \
+                     entries); remove {} and re-run to rebuild it",
+                    vdir.display()
+                ),
                 None => exhausted = true,
             }
         }
@@ -295,13 +323,11 @@ pub async fn run(
             break;
         };
         let (idx, kind, result) = joined.context("content check task panicked")?;
-        finished.insert(idx, (kind, result));
-        while let Some((kind, result)) = finished.remove(&progress.frontier) {
-            record(&mut progress.counts, kind, &result, &mut out)?;
-            progress.frontier += 1;
-        }
+        unfinished.remove(&idx);
+        record(&mut progress.counts, kind, &result, &mut out)?;
         if last_checkpoint.elapsed() >= CHECKPOINT_EVERY {
-            checkpoint(&mut out, &mut progress, &progress_path)?;
+            let issued = next_idx.max(issued);
+            checkpoint(&mut out, &mut progress, issued, &unfinished, &progress_path)?;
             last_checkpoint = Instant::now();
             let c = &progress.counts;
             tracing::info!(
@@ -314,13 +340,10 @@ pub async fn run(
             );
         }
     }
-    debug_assert!(
-        finished.is_empty(),
-        "frontier must have consumed every result"
-    );
     let interrupted = !exhausted;
     progress.complete = !interrupted;
-    checkpoint(&mut out, &mut progress, &progress_path)?;
+    let issued = next_idx.max(issued);
+    checkpoint(&mut out, &mut progress, issued, &unfinished, &progress_path)?;
     Ok(ContentOutcome {
         counts: progress.counts,
         interrupted,
@@ -353,16 +376,22 @@ fn record(
     Ok(())
 }
 
-/// Make everything below the frontier durable, in order: records,
-/// then the progress file that vouches for them.
+/// Make every done entry durable, in order: records, then the
+/// progress file that vouches for them. Every entry below `issued` is
+/// done except those in `unfinished`.
 fn checkpoint(
     out: &mut BufWriter<File>,
     progress: &mut ContentProgress,
+    issued: u64,
+    unfinished: &BTreeSet<u64>,
     progress_path: &Path,
 ) -> Result<()> {
     out.flush()?;
     out.get_ref().sync_all()?;
     progress.mismatch_file_len = out.get_ref().metadata()?.len();
+    progress.issued = issued;
+    progress.unfinished = unfinished.iter().copied().collect();
+    progress.frontier = unfinished.first().copied().unwrap_or(progress.issued);
     write_json_atomic(progress_path, progress)
 }
 
@@ -840,6 +869,59 @@ mod tests {
         (tmp, wd, Arc::new(fake))
     }
 
+    /// The recorded mismatch paths, sorted: records land in completion
+    /// order.
+    fn sorted_paths(wd: &WorkDir) -> Vec<Vec<u8>> {
+        let mut paths: Vec<Vec<u8>> = mismatches(wd).iter().map(|m| m.path().unwrap()).collect();
+        paths.sort();
+        paths
+    }
+
+    /// Wraps a checker: notes every path it is asked for, and holds
+    /// `stall` until every other entry has been checked.
+    struct Watching {
+        inner: Arc<FakeChecker>,
+        asked: std::sync::Mutex<Vec<Vec<u8>>>,
+        stall: Option<(&'static [u8], usize)>,
+        done: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Watching {
+        fn new(inner: Arc<FakeChecker>) -> Self {
+            Self {
+                inner,
+                asked: std::sync::Mutex::new(Vec::new()),
+                stall: None,
+                done: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn asked(&self) -> Vec<Vec<u8>> {
+            let mut asked = self.asked.lock().unwrap().clone();
+            asked.sort();
+            asked
+        }
+    }
+
+    #[async_trait]
+    impl ContentChecker for Watching {
+        async fn check(&self, entry: &TodoEntry) -> CheckResult {
+            use std::sync::atomic::Ordering::SeqCst;
+            self.asked.lock().unwrap().push(entry.path.clone());
+            if let Some((path, others)) = self.stall {
+                if entry.path == path {
+                    while self.done.load(SeqCst) < others {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    return self.inner.check(entry).await;
+                }
+            }
+            let r = self.inner.check(entry).await;
+            self.done.fetch_add(1, SeqCst);
+            r
+        }
+    }
+
     fn mismatches(wd: &WorkDir) -> Vec<Mismatch> {
         std::fs::read_to_string(wd.root().join(MISMATCHES_FILE))
             .unwrap()
@@ -850,7 +932,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn driver_reads_everything_and_records_in_order() {
+    async fn driver_reads_everything_and_records_each_mismatch_once() {
         let (_tmp, wd, fake) = fixture(50, &[3, 17, 42]);
         let out = run(&wd, fake, 8, 0, CancellationToken::new())
             .await
@@ -866,16 +948,13 @@ mod tests {
                 .map(|i| format!("body-{i}").len() as u64)
                 .sum::<u64>()
         );
-        let m = mismatches(&wd);
-        let paths: Vec<Vec<u8>> = m.iter().map(|m| m.path().unwrap()).collect();
         assert_eq!(
-            paths,
+            sorted_paths(&wd),
             vec![
                 b"/f/0003".to_vec(),
                 b"/f/0017".to_vec(),
                 b"/f/0042".to_vec()
             ],
-            "frontier order"
         );
         // Complete: a re-run does no work and reports the same counts.
         let again = run(
@@ -905,6 +984,8 @@ mod tests {
             &ContentProgress {
                 complete: false,
                 frontier: 5,
+                issued: 0,
+                unfinished: Vec::new(),
                 mismatch_file_len: good.len() as u64,
                 counts: ContentCounts {
                     entries_done: 5,
@@ -930,6 +1011,113 @@ mod tests {
         assert_eq!(m.len(), 2, "torn tail removed, nothing duplicated: {m:?}");
         assert_eq!(m[0].path().unwrap(), b"/f/0002");
         assert_eq!(m[1].path().unwrap(), b"/f/0015");
+    }
+
+    #[tokio::test]
+    async fn driver_resumes_past_done_entries_and_rereads_unfinished_ones() {
+        let (_tmp, wd, fake) = fixture(20, &[4, 6, 15]);
+        // A checkpoint taken while entries 4 and 9 were running: every
+        // other entry below 12 is done, and entry 6's mismatch is on
+        // record.
+        let rec = serde_json::to_string(&Mismatch::new(b"/f/0006", MismatchKind::Content)).unwrap();
+        let good = format!("{rec}\n");
+        std::fs::write(wd.root().join(MISMATCHES_FILE), &good).unwrap();
+        write_json_atomic(
+            &wd.verify_dir().join(PROGRESS_FILE),
+            &ContentProgress {
+                complete: false,
+                frontier: 4,
+                issued: 12,
+                unfinished: vec![4, 9],
+                mismatch_file_len: good.len() as u64,
+                counts: ContentCounts {
+                    entries_done: 10,
+                    files_read: 10,
+                    content: 1,
+                    ..ContentCounts::default()
+                },
+            },
+        )
+        .unwrap();
+        let checker = Arc::new(Watching::new(fake));
+        let out = run(&wd, checker.clone(), 4, 0, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(!out.interrupted);
+        let mut want: Vec<Vec<u8>> = [4, 9]
+            .into_iter()
+            .chain(12..20)
+            .map(|i| format!("/f/{i:04}").into_bytes())
+            .collect();
+        want.push(b"/link".to_vec());
+        want.sort();
+        assert_eq!(checker.asked(), want, "only what was not done is read");
+        assert_eq!(out.counts.entries_done, 21);
+        assert_eq!(out.counts.files_read, 20);
+        assert_eq!(out.counts.content, 3);
+        assert_eq!(
+            sorted_paths(&wd),
+            vec![
+                b"/f/0004".to_vec(),
+                b"/f/0006".to_vec(),
+                b"/f/0015".to_vec()
+            ],
+            "nothing duplicated"
+        );
+        let progress: ContentProgress = read_json_opt(&wd.verify_dir().join(PROGRESS_FILE))
+            .unwrap()
+            .unwrap();
+        assert!(progress.complete);
+        assert_eq!((progress.frontier, progress.issued), (21, 21));
+        assert!(progress.unfinished.is_empty());
+    }
+
+    /// The first entry stalls until all 200 others are done. They are
+    /// read meanwhile, four at a time, and each result is recorded as
+    /// it completes rather than held behind the stalled one.
+    #[tokio::test]
+    async fn a_slow_entry_does_not_hold_back_the_others() {
+        let (_tmp, wd, fake) = fixture(200, &[0, 150]);
+        let mut checker = Watching::new(fake);
+        checker.stall = Some((b"/f/0000", 200));
+        let checker = Arc::new(checker);
+        let out = tokio::time::timeout(
+            Duration::from_secs(60),
+            run(&wd, checker.clone(), 4, 0, CancellationToken::new()),
+        )
+        .await
+        .expect("the stalled entry finished last")
+        .unwrap();
+        assert_eq!(out.counts.entries_done, 201);
+        let paths = mismatches(&wd)
+            .iter()
+            .map(|m| m.path().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec![b"/f/0150".to_vec(), b"/f/0000".to_vec()],
+            "recorded as they completed"
+        );
+    }
+
+    /// A checkpoint written before `issued` and `unfinished` existed.
+    #[tokio::test]
+    async fn an_older_checkpoint_resumes_from_its_frontier() {
+        let (_tmp, wd, fake) = fixture(10, &[]);
+        std::fs::write(
+            wd.verify_dir().join(PROGRESS_FILE),
+            r#"{"complete": false, "frontier": 6, "mismatch_file_len": 0,
+                "counts": {"entries_done": 6, "files_read": 6, "bytes_read": 36,
+                           "symlinks_read": 0, "content": 0, "symlink_target": 0,
+                           "read_error": 0}}"#,
+        )
+        .unwrap();
+        let checker = Arc::new(Watching::new(fake));
+        let out = run(&wd, checker.clone(), 4, 0, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(checker.asked().len(), 5, "entries 6 to 9 and the link");
+        assert_eq!(out.counts.entries_done, 11);
     }
 
     #[tokio::test]
@@ -960,6 +1148,8 @@ mod tests {
             &ContentProgress {
                 complete: false,
                 frontier: 99,
+                issued: 0,
+                unfinished: Vec::new(),
                 mismatch_file_len: 0,
                 counts: ContentCounts::default(),
             },
