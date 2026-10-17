@@ -5,9 +5,10 @@ fixed budgets), never on the size of the tree. Every structure that grows
 with the number of entries is to be streamed, spilled to disk, or capped by a
 budget, with correct behavior when something is evicted.
 
-**Status (2026-10-17):** the walker scan is bounded (nfs-walker `f6f7572`,
-mongoose PR #26). Step 1 is closed with no change, steps 2 to 6 merged
-(PRs #31 to #35), and step 8 is in this change. Step 7 is open.
+**Status (2026-10-17): complete.** The walker scan is bounded (nfs-walker
+`f6f7572`, mongoose PR #26). Steps 1 and 7 are closed with no change, and
+steps 2 to 6 and 8 merged (PRs #31 to #36). One check remains: a run on a
+much larger tree, to confirm the total.
 
 ## What grows with tree size
 
@@ -184,9 +185,18 @@ Fixed but large: each copy micro-batch spawns all of its rows at once, at
 
    One directory with millions of subdirectories still queues all of them
    when it is read.
-7. **The READDIRPLUS child cache's evicted set** (`DirChildrenState`): it
-   is capped at 1,000,000 paths, about 45 MB on this tree and up to about
-   150 MB.
+7. **The READDIRPLUS child cache's evicted set. Closed, no change.** The
+   set (`DirChildrenState::evicted` in `migration-mover/src/mover.rs`)
+   remembers directories evicted from the child cache, so they are not
+   read again. It is already capped at 1,000,000 paths
+   (`DIR_CHILDREN_EVICTED_CAP`). Once it is full, later evictions go
+   unrecorded, so it stops at about 45 MB on the directory-heavy tree and
+   at most about 150 MB, whatever the tree's size.
+
+   A smaller cap would save at most that 150 MB. Directories evicted past
+   the cap have their children read again on the next row that needs them,
+   which can slow a copy. Measuring that safely needs a long
+   directory-heavy copy on var204, which is not worth the saving.
 8. **Regression guard.** `crates/mongoose/tests/memory_ceiling.rs` runs
    with the rest of `cargo test` and needs no NFS. The tree is synthetic:
    2,001,000 entries, half of them directories, written by the walker's
@@ -227,7 +237,10 @@ Fixed but large: each copy micro-batch spawns all of its rows at once, at
      peaks were identical on both.
 
 The target after steps 1–8 is about 1–1.5 GB peak for any tree size. The
-phases above stay under their ceilings, a no-op sync of the 2M-file tree
-peaked at about 640 MB with its scan, and the directory caches stop at
-about 280 MB. A run on a much larger tree is still needed to confirm the
-total.
+estimate rests on these figures:
+- the phases above stay under their ceilings;
+- a no-op sync of the 2M-file tree peaked at about 640 MB with its scan;
+- the directory caches stop at about 280 MB;
+- the evicted set stops at about 150 MB.
+
+A run on a much larger tree is still needed to confirm the total.
