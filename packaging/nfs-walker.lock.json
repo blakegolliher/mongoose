@@ -2,9 +2,9 @@
   "schema_version": 1,
   "source_url": "https://github.com/blakegolliher/nfs-walker",
   "source_git_ref": "main",
-  "source_git_sha": "f6f75725d8014a3c3bd943f5dd3650aef54a9cd7",
+  "source_git_sha": "0e9b7956cf09302a8ff812b2fa0ef34b25f72cce",
   "version": "nfs-walker 0.2.0",
-  "artifact_sha256": "792552c9c3f21f7d6c7fcf4fdbaea4152f8f082adbf690a7c43f876b54953921",
+  "artifact_sha256": "2f1c23c2101dfd596e1d079396b8c7f1f71b93f899915edf9293c55a2e8a1309",
   "target": "x86_64-unknown-linux-gnu.2.34",
   "artifact_build": "NFS_WALKER_LIBNFS_DIR=packaging/libnfs-stage cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.34 --no-default-features (max GLIBC symbol 2.34)"
 }

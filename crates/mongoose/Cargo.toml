@@ -33,7 +33,7 @@ base64             = { workspace = true }
 # together (docs/PRODUCTION_RELEASE_HANDOFF.md, PR-01/PR-02).
 # default-features = false drops the optional analytics dashboard
 # (datafusion/axum/rust-embed) — mongoose only needs the walk engine.
-nfs-walker = { git = "https://github.com/blakegolliher/nfs-walker", rev = "f6f75725d8014a3c3bd943f5dd3650aef54a9cd7", default-features = false }
+nfs-walker = { git = "https://github.com/blakegolliher/nfs-walker", rev = "0e9b7956cf09302a8ff812b2fa0ef34b25f72cce", default-features = false }
 
 tokio              = { workspace = true }
 tokio-util         = { workspace = true }

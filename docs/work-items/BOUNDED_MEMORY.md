@@ -6,8 +6,8 @@ with the number of entries is to be streamed, spilled to disk, or capped by a
 budget, with correct behavior when something is evicted.
 
 **Status (2026-10-16):** the walker scan is bounded (nfs-walker `f6f7572`,
-mongoose PR #26). Step 1 is closed with no change, steps 2 and 3 merged
-(PRs #31 and #32), and step 4 is in this change. Steps 5 to 8 are open.
+mongoose PR #26). Step 1 is closed with no change, steps 2 to 4 merged
+(PRs #31 to #33), and step 6 is in this change. Steps 5, 7 and 8 are open.
 
 ## What grows with tree size
 
@@ -117,13 +117,28 @@ Fixed but large: each copy micro-batch spawns all of its rows at once, at
    - filtering records while reading them in the pending-set load;
    - writing the failure and downgrade logs incrementally;
    - spawning micro-batch rows lazily.
-6. **The walker's pending-directory queue** (nfs-walker, then a pin bump).
-   The walker's work-stealing deques are FIFO, so the scan is
-   breadth-first, and on a wide tree most of a level waits in the queue at
-   once. The 1M-directory scan peaked at about 710 MB, against about
-   600 MB for 2M files in 4,764 directories. LIFO local deques (depth-first
-   per worker, steals still taking the oldest work) should keep it near
-   depth × fan-out per worker. This needs measuring.
+6. **The walker's pending-directory queue.** nfs-walker `0e9b795` makes each
+   worker's own queue LIFO. The scan used to go breadth first, and most of
+   the tree's widest level waited in the queues at once. Now it goes depth
+   first, and peers still steal the oldest, shallowest directory a worker
+   has queued. The directories waiting at once stay near the tree's
+   depth × fan-out: a walker test on a full tree of 6⁴ leaf directories
+   holds at most 21 pending, against 1,296 before.
+
+   Standalone walker on var204 with 32 workers, alternating runs:
+
+   | Tree | Before | After |
+   |---|---|---|
+   | 1M directories, 1M files | 727–749 MB, 33–34 s | 625–675 MB, 28–34 s |
+   | 2M files in 4,764 directories | 718–726 MB, 8.1 s | 710–744 MB, 8.1–8.2 s |
+
+   In mongoose, a no-op `sync` of the 2M-file tree with this walker peaked
+   at 640 MB, against 636 MB with the previous pin. It classified all
+   2,004,879 entries unchanged against a baseline the breadth-first walker
+   wrote.
+
+   One directory with millions of subdirectories still queues all of them
+   when it is read.
 7. **The READDIRPLUS child cache's evicted set** (`DirChildrenState`): it
    is capped at 1,000,000 paths, about 45 MB on this tree and up to about
    150 MB.
