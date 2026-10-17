@@ -665,8 +665,8 @@ fn ensure_classify(
 /// (failures JSONL) or committed torn (TornCopy downgrades). Forced
 /// DIRTY until a pass succeeds on them. Records are read one at a
 /// time: a pass can have a downgrade for every row, and only torn
-/// copies are kept.
-fn collect_pending(baseline_wd: &WorkDir) -> Result<HashSet<Vec<u8>>> {
+/// copies are kept. Public so `tests/memory_ceiling.rs` can measure it.
+pub fn collect_pending(baseline_wd: &WorkDir) -> Result<HashSet<Vec<u8>>> {
     let mut pending = HashSet::new();
     for_each_jsonl_record(&baseline_wd.failures_dir(), |record: FailureRecord| {
         pending.insert(decode_path(&record.path_b64)?);
