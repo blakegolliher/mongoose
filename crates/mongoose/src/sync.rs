@@ -54,6 +54,7 @@ use migration_core::records::{DowngradeKind, DowngradeRecord, FailureRecord};
 use migration_resync::ClassifyCounts;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 /// File name of the NEW+DIRTY manifest inside a pass dir.
@@ -662,17 +663,21 @@ fn ensure_classify(
 
 /// The pending set: paths whose copy failed in the baseline pass
 /// (failures JSONL) or committed torn (TornCopy downgrades). Forced
-/// DIRTY until a pass succeeds on them.
+/// DIRTY until a pass succeeds on them. Records are read one at a
+/// time: a pass can have a downgrade for every row, and only torn
+/// copies are kept.
 fn collect_pending(baseline_wd: &WorkDir) -> Result<HashSet<Vec<u8>>> {
     let mut pending = HashSet::new();
-    for record in read_jsonl_dir::<FailureRecord>(&baseline_wd.failures_dir())? {
+    for_each_jsonl_record(&baseline_wd.failures_dir(), |record: FailureRecord| {
         pending.insert(decode_path(&record.path_b64)?);
-    }
-    for record in read_jsonl_dir::<DowngradeRecord>(&baseline_wd.downgrades_dir())? {
+        Ok(())
+    })?;
+    for_each_jsonl_record(&baseline_wd.downgrades_dir(), |record: DowngradeRecord| {
         if matches!(record.downgrade, DowngradeKind::TornCopy { .. }) {
             pending.insert(decode_path(&record.path_b64)?);
         }
-    }
+        Ok(())
+    })?;
     Ok(pending)
 }
 
@@ -683,12 +688,14 @@ fn decode_path(b64: &str) -> Result<Vec<u8>> {
 }
 
 /// Parse every record of every `*.jsonl` file in `dir` (absent dir =
-/// no records).
-fn read_jsonl_dir<T: serde::de::DeserializeOwned>(dir: &Path) -> Result<Vec<T>> {
-    let mut out = Vec::new();
+/// no records), handing each to `f` as it is read.
+fn for_each_jsonl_record<T: serde::de::DeserializeOwned>(
+    dir: &Path,
+    mut f: impl FnMut(T) -> Result<()>,
+) -> Result<()> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
     };
     for entry in entries {
@@ -696,16 +703,18 @@ fn read_jsonl_dir<T: serde::de::DeserializeOwned>(dir: &Path) -> Result<Vec<T>> 
         if path.extension().is_none_or(|x| x != "jsonl") {
             continue;
         }
-        let body = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        for line in body.lines().filter(|l| !l.trim().is_empty()) {
-            out.push(
-                serde_json::from_str(line)
-                    .with_context(|| format!("parsing a record in {}", path.display()))?,
-            );
+        let file =
+            std::fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?;
+        for line in std::io::BufReader::new(file).lines() {
+            let line = line.with_context(|| format!("reading {}", path.display()))?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            f(serde_json::from_str(&line)
+                .with_context(|| format!("parsing a record in {}", path.display()))?)?;
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Remove completed pass dirs older than the retention window. Never
@@ -878,6 +887,17 @@ mod tests {
                 serde_json::to_string(&torn).unwrap(),
                 serde_json::to_string(&benign).unwrap()
             ),
+        )
+        .unwrap();
+
+        // A copy's unfinished spill is not a result file.
+        let unfinished = DowngradeRecord {
+            path_b64: b64(b"/a/unfinished"),
+            ..torn.clone()
+        };
+        std::fs::write(
+            wd.downgrades_dir().join(".part-0001.jsonl.partial"),
+            format!("{}\n", serde_json::to_string(&unfinished).unwrap()),
         )
         .unwrap();
 
