@@ -41,6 +41,19 @@ install -D -m0644 %{_sourcedir}/LIBNFS_SOURCE.md %{buildroot}%{_docdir}/mongoose
 %doc %{_docdir}/mongoose/LIBNFS_SOURCE.md
 
 %changelog
+* Mon Oct 19 2026 Blake Golliher <blakegolliher@gmail.com> - 0.2.1-1
+- --exclude now leaves out each matching directory and its subtree.
+- A scan that cannot read every directory fails instead of completing.
+- --cutover verifies the destination itself, including every file's bytes.
+- Refuses a source and destination that may overlap, even through aliases.
+- Torn copies are recorded and recopied; one process per work directory;
+  records are durable and shard digests are checked; 130/143 on interrupt.
+- Fifos, sockets, and device nodes are reported instead of copied.
+- Spreads copies across every server address; memory no longer grows with
+  the tree.
+- Ships libnfs's license, exact source, and relink kit; see
+  `mongoose licenses --component libnfs`.
+
 * Wed Sep 02 2026 Blake Golliher <blakegolliher@gmail.com> - 0.2.0-1
 - Simplified CLI: `copy` and `sync`, one --parallel load knob, paths in URLs.
 - Raw-filehandle fast path is now always on; excludes remembered per job.

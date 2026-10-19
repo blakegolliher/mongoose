@@ -2261,7 +2261,7 @@ dependencies = [
 
 [[package]]
 name = "mig-walker-rewrite"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "arrow",
@@ -2278,7 +2278,7 @@ dependencies = [
 
 [[package]]
 name = "migration-control-protocol"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "serde",
@@ -2290,7 +2290,7 @@ dependencies = [
 
 [[package]]
 name = "migration-coord"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2320,7 +2320,7 @@ dependencies = [
 
 [[package]]
 name = "migration-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "arrow",
@@ -2346,7 +2346,7 @@ dependencies = [
 
 [[package]]
 name = "migration-mover"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2365,7 +2365,7 @@ dependencies = [
 
 [[package]]
 name = "migration-resync"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "arrow",
@@ -2381,7 +2381,7 @@ dependencies = [
 
 [[package]]
 name = "migration-worker"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "arrow",
@@ -2442,7 +2442,7 @@ dependencies = [
 
 [[package]]
 name = "mongoose"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "arrow",

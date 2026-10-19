@@ -70,7 +70,7 @@ mod tests {
         assert!(output.contains("LGPL-2.1-or-later"));
         assert!(output.contains(&lock.source_git_sha));
         assert!(output.contains("statically linked"));
-        assert!(output.contains("mongoose-0.2.0-relink-kit.tar.gz"));
+        assert!(output.contains("mongoose-0.2.1-relink-kit.tar.gz"));
         assert!(output.contains("GNU LESSER GENERAL PUBLIC LICENSE"));
         assert!(output.contains("END OF TERMS AND CONDITIONS"));
     }
