@@ -1,0 +1,2295 @@
+{
+  "format": 1,
+  "release": {
+    "tag": "v0.2.1",
+    "tag_object": "ce2fb9425ce9a55149c606769c6f20a96b069c98",
+    "commit": "a71e36bc8009a0c9272931b79c523c6777a16691",
+    "workflow_run": 39294683056,
+    "sha256sums_sha256": "7266617510ff550280aee4622e69d8b4486727154cee0553f78c0aca6e51eced",
+    "artifacts": {
+      "mongoose-0.2.1-1.x86_64.rpm": "d0df9e8ff9680bb9cf1f2e156aa4b7402ea53771d9f379dd996b6230901f831d",
+      "mongoose_0.2.1-1_amd64.deb": "0134c1ecb16ac2b3e14548fe999257b06f956e5ce178243d5d0fe1f14d028453",
+      "mongoose-0.2.1-linux-x86_64.tar.gz": "c2f0dd29d322796a5e79234829a14f9b16378843e24e50e3335be27e43341069",
+      "mongoose-linux-x86_64": "0db2bb0e8462040422472e04baf7aacb128a472ab55f7b29a22445f6e22e7e9a",
+      "mongoose-0.2.1-sbom.cdx.json": "4091571e98b3adf00727e51094047e8f1051fa9e1cbeb4d62d9d28948f07935e",
+      "mongoose-0.2.1-source.tar.gz": "87d3b3f959c972cb5a1be485a4c22b4106a7bdd32ff81e0fb952f21a91d743b6",
+      "mongoose-0.2.1-relink-kit.tar.gz": "0220bfbda45e25fc933d45ad9672be497beb9fd59b6d50823f42d9d124b1c178",
+      "libnfs-6073b694784b-source.tar.gz": "57ec5f77d57435578a83241c4fd6490574e557fb7e7482ad71013d06cef7e113",
+      "LICENSES.txt": "8ecdf68c6dd7a67af5d9244ec0c67a37471e9603695819ebd0ab91912ef4f7bd",
+      "THIRD_PARTY_LICENSES.md": "0978efd996f5bb440e7d0ef832e634fded7ef449e41a51733f39f3992f901491",
+      "LIBNFS_SOURCE.md": "f77de9f88bd6547ff8051702cce845665d8b96216a38a20e437be8877e748982",
+      "RELINK-VERIFICATION.txt": "835ac696a4a5bab87d574527c656e639cec93fe729aea6e825fa1bf3be64df97",
+      "LICENSE-MIT": "037e6ffc0eb3c5f226d072fd2bed49e13eaaea9b140697351c60ec8e465d81bc",
+      "LICENSE-LGPL-2.1.txt": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551",
+      "LICENSE-BSD-2-Clause-libnfs.txt": "d9406ced95457941032aa11d04623b8ab71f2827a3395ebef137aec475be35b1"
+    }
+  },
+  "artifact_verification": {
+    "source": "the run's frozen release-set and signature artifacts, downloaded",
+    "verify_release": {
+      "result": "pass",
+      "cosign": "v3.1.3",
+      "gh": "2.68.0",
+      "log": "verify-local.log",
+      "log_sha256": "abff50b8c3a66b1c5c629aaa84be59f84aa4e8aff52eb95a1ee61b366356477e"
+    },
+    "lgpl_gate": {
+      "result": "pass",
+      "command": "scripts/check-lgpl-compliance.sh --release-dir <set> --version 0.2.1 --binary <set>/mongoose-linux-x86_64",
+      "log": "lgpl-gate.log",
+      "log_sha256": "4fb9c45b2415235cf623eab150c592d0a10d5369690039267b3f8149bc3a1bfe"
+    },
+    "binary": {
+      "name": "mongoose-linux-x86_64",
+      "version_output": "mongoose 0.2.1",
+      "max_glibc_symbol": "GLIBC_2.34",
+      "needed": [
+        "libm.so.6",
+        "libc.so.6"
+      ]
+    },
+    "every_test_checked_the_binary_digest": true
+  },
+  "environment": {
+    "client": {
+      "os": "Ubuntu 24.04.4 LTS",
+      "kernel": "6.12.41-061241-generic",
+      "cpu": "AMD EPYC 7402P, 8 vCPUs, AES-NI",
+      "memory_bytes": 12539658240,
+      "run_as": "root (sudo)"
+    },
+    "nfs": {
+      "server": "the lab VAST cluster",
+      "protocol": "NFSv3",
+      "addresses": "six virtual IPs behind one round-robin DNS name",
+      "source_export": "/source",
+      "destination_export": "/dest",
+      "test_root": "qual-0.2.1 under each export",
+      "root_squash": false,
+      "second_server": null,
+      "notes": [
+        "one NFS server only for this release",
+        "`.snapshot` is a reserved hidden virtual directory on this server"
+      ]
+    },
+    "kernel_mounts": "fixtures written through the client's vers=3 mounts; every check read through separate noac,lookupcache=none mounts",
+    "containers": {
+      "engine": "podman 4.9.3, rootful, host networking",
+      "rocky9": {
+        "image": "quay.io/rockylinux/rockylinux:9",
+        "digest": "sha256:8101994123cf3d0a8fee517bee7f39e555c7d92bd2d9eb3303cc988a0eeed00f",
+        "glibc": "2.34"
+      },
+      "debian12": {
+        "image": "docker.io/library/debian:12",
+        "digest": "sha256:2c037a04925515fdd6ea85ea14a682d0e79931f5e9f5d07b6dbfc6ba12f9e858",
+        "glibc": "2.36"
+      }
+    }
+  },
+  "harness": {
+    "scripts": "docs/qualification/tools/release-harness/ (copies with the server, addresses, and local paths made parameters)",
+    "mg": "sudo -n <attested-binary>",
+    "logs": "kept on the client in ~/mongoose-qual-0.2.1; each step's log_sha256 is below"
+  },
+  "tests": [
+    {
+      "id": "exclusion",
+      "maps_to": [
+        "PR-01"
+      ],
+      "required": true,
+      "result": "pass",
+      "proves": "Excluded directories and their subtrees are neither copied nor indexed, in the copy, a later sync, and the cutover; files never match; an invalid pattern is refused before any scan, run.json, or destination write.",
+      "final_run": {
+        "run": "t1-exclude-4",
+        "started": "2026-10-19T18:08:02.477Z",
+        "finished": "2026-10-19T18:09:15.328Z",
+        "steps": 14,
+        "steps_not_ok": []
+      },
+      "earlier_runs": [
+        {
+          "run": "t1-exclude",
+          "started": "2026-10-19T17:59:12.902Z",
+          "finished": "2026-10-19T18:00:06.823Z",
+          "steps": 13,
+          "steps_not_ok": [
+            "check-invalid-wrote-nothing",
+            "check-index-has-exactly-the-kept-paths",
+            "check-sync-copied-only-kept"
+          ],
+          "reason": "harness: VAST reserves `.snapshot` (a hidden read-only virtual directory), so the fixture could not create one; the expected index list wrongly included `/`"
+        },
+        {
+          "run": "t1-exclude-2",
+          "started": "2026-10-19T18:00:51.198Z",
+          "finished": "2026-10-19T18:01:51.106Z",
+          "steps": 14,
+          "steps_not_ok": [],
+          "reason": "passed, but checked through the cached kernel mount; rerun on uncached mounts"
+        },
+        {
+          "run": "t1-exclude-3",
+          "started": "2026-10-19T18:07:10.659Z",
+          "finished": "2026-10-19T18:07:28.990Z",
+          "steps": 14,
+          "steps_not_ok": [
+            "copy",
+            "check-dest-has-exactly-the-kept-entries",
+            "sync",
+            "check-sync-copied-only-kept",
+            "sync-before-cutover",
+            "cutover"
+          ],
+          "reason": "environment: one copy's mount failed to resolve the server name (transient DNS); mongoose exited 1"
+        }
+      ],
+      "steps": [
+        {
+          "note": "fixture: /mnt/qual-src-noac/exclude-4",
+          "at": "2026-10-19T18:08:02.213Z"
+        },
+        {
+          "step": "fixture-tree",
+          "command": "snap /mnt/qual-src-noac/exclude-4",
+          "started": "2026-10-19T18:08:02.477Z",
+          "finished": "2026-10-19T18:08:02.545Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "01-fixture-tree.log",
+          "log_sha256": "47f2c9d6d9d4f5111195c47190aa52d338b45e1d19b92ce4ae514389cb14cf8c"
+        },
+        {
+          "step": "invalid-pattern",
+          "command": "mg copy --src nfs://<server>/source/qual-0.2.1/exclude-4 --dst nfs://<server>/dest/qual-0.2.1/exclude-4 --work-dir /var/lib/mongoose/qual-0.2.1/exclude-4-invalid --exclude keep/sub",
+          "started": "2026-10-19T18:08:02.567Z",
+          "finished": "2026-10-19T18:08:02.591Z",
+          "exit": 1,
+          "expected": "1",
+          "ok": true,
+          "log": "02-invalid-pattern.log",
+          "log_sha256": "aba632dffcb6771f1b7e4a192ce8b166442b11cb35849458b749c0e9c65cf1cf"
+        },
+        {
+          "step": "check-invalid-no-run-json-or-scan",
+          "command": "bash -c \\!\\ sudo\\ -n\\ test\\ -e\\ /var/lib/mongoose/qual-0.2.1/exclude-4-invalid/run.json\\ \\&\\&\\ \\!\\ sudo\\ -n\\ test\\ -e\\ /var/lib/mongoose/qual-0.2.1/exclude-4-invalid/scan",
+          "started": "2026-10-19T18:08:02.613Z",
+          "finished": "2026-10-19T18:08:02.649Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "03-check-invalid-no-run-json-or-scan.log",
+          "log_sha256": "2dda6d7bb982f035bbb22f368d02839c1122231d2b67dff2fb9633b7ff91825b"
+        },
+        {
+          "step": "invalid-work-dir-contents",
+          "command": "sudo -n ls -A /var/lib/mongoose/qual-0.2.1/exclude-4-invalid",
+          "started": "2026-10-19T18:08:02.669Z",
+          "finished": "2026-10-19T18:08:02.686Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "04-invalid-work-dir-contents.log",
+          "log_sha256": "c61cd9c66519aad068a918ce54662eabe4c5f42eef513a6090c4eb3183098ba7"
+        },
+        {
+          "step": "check-invalid-dest-untouched",
+          "command": "bash -c test\\ -z\\ \\\"\\$\\(sudo\\ -n\\ ls\\ -A\\ /mnt/qual-dst-noac/exclude-4\\)\\\"",
+          "started": "2026-10-19T18:08:02.705Z",
+          "finished": "2026-10-19T18:08:02.731Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "05-check-invalid-dest-untouched.log",
+          "log_sha256": "0cc6f6a736df472a04f51f1753c47cf965af2e0cbcae7ce0e6cdeb7e2a8f088b"
+        },
+        {
+          "step": "copy",
+          "command": "mg copy --src nfs://<server>/source/qual-0.2.1/exclude-4 --dst nfs://<server>/dest/qual-0.2.1/exclude-4 --work-dir /var/lib/mongoose/qual-0.2.1/exclude-4 --exclude .snapshot --exclude \\*.tmp --exclude .zfs",
+          "started": "2026-10-19T18:08:02.751Z",
+          "finished": "2026-10-19T18:08:24.659Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "06-copy.log",
+          "log_sha256": "70686879639adfdfd945c7494baddd4e779081d2982a87263a265824852b6ec1"
+        },
+        {
+          "step": "check-dest-has-exactly-the-kept-entries",
+          "command": "diff /dev/fd/63 /dev/fd/62",
+          "started": "2026-10-19T18:08:24.687Z",
+          "finished": "2026-10-19T18:08:24.720Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "07-check-dest-has-exactly-the-kept-entries.log",
+          "log_sha256": "29e1d7efe5aee60c1812c829615be15e3ac6d896f48c1a14ffd288d73f3982a6"
+        },
+        {
+          "step": "check-run-json-keeps-excludes",
+          "command": "sudo -n jq -e .exclude\\ ==\\ \\[\\\".snapshot\\\"\\,\\ \\\"\\*.tmp\\\"\\,\\ \\\".zfs\\\"\\] /var/lib/mongoose/qual-0.2.1/exclude-4/run.json",
+          "started": "2026-10-19T18:08:24.743Z",
+          "finished": "2026-10-19T18:08:24.767Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "08-check-run-json-keeps-excludes.log",
+          "log_sha256": "648db5f6cd499676e93da7e0b664dcdd5fb17d377722639275013cc78235906c"
+        },
+        {
+          "step": "check-index-has-exactly-the-kept-paths",
+          "command": "diff <harness>/t1-exclude-4/index-paths.txt /dev/fd/63",
+          "started": "2026-10-19T18:08:24.864Z",
+          "finished": "2026-10-19T18:08:24.869Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "09-check-index-has-exactly-the-kept-paths.log",
+          "log_sha256": "38895729ca0717734146f820d7c9d884b4db8cd164c3c541ab66c12ed43b51c1"
+        },
+        {
+          "note": "add files under kept and excluded directories, then sync",
+          "at": "2026-10-19T18:08:24.889Z"
+        },
+        {
+          "step": "sync",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/exclude-4",
+          "started": "2026-10-19T18:08:25.018Z",
+          "finished": "2026-10-19T18:08:40.657Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "10-sync.log",
+          "log_sha256": "925e5fb98768363c027c218a339469122a9400f7f29f0c359773f1e4551a0455"
+        },
+        {
+          "step": "check-sync-copied-only-kept",
+          "command": "diff /dev/fd/63 /dev/fd/62",
+          "started": "2026-10-19T18:08:40.680Z",
+          "finished": "2026-10-19T18:08:40.710Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "11-check-sync-copied-only-kept.log",
+          "log_sha256": "29e1d7efe5aee60c1812c829615be15e3ac6d896f48c1a14ffd288d73f3982a6"
+        },
+        {
+          "step": "sync-before-cutover",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/exclude-4",
+          "started": "2026-10-19T18:08:40.730Z",
+          "finished": "2026-10-19T18:08:52.516Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "12-sync-before-cutover.log",
+          "log_sha256": "206b001577dd3937830bd61db16fc2d2d6af9e5d9728b1bcacb497f7a81faa58"
+        },
+        {
+          "step": "cutover",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/exclude-4 --cutover",
+          "started": "2026-10-19T18:08:52.537Z",
+          "finished": "2026-10-19T18:09:15.272Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "13-cutover.log",
+          "log_sha256": "062434e2f570cb092426e6203ac7324643b4b82d95e5a9ca63cbf52d05e9770c"
+        },
+        {
+          "step": "cutover-report",
+          "command": "bash -c sudo\\ -n\\ find\\ /var/lib/mongoose/qual-0.2.1/exclude-4/passes\\ -name\\ verify.json\\ \\|\\ LC_ALL=C\\ sort\\ \\|\\ tail\\ -1\\ \\|\\ xargs\\ sudo\\ -n\\ cat",
+          "started": "2026-10-19T18:09:15.294Z",
+          "finished": "2026-10-19T18:09:15.328Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "14-cutover-report.log",
+          "log_sha256": "1fbba65fcf46f7f571e958bd13418192b9538572faa13491e3984b068e1442b9"
+        }
+      ]
+    },
+    {
+      "id": "scan-error",
+      "maps_to": [
+        "PR-02"
+      ],
+      "required": true,
+      "result": "not run"
+    },
+    {
+      "id": "cutover",
+      "maps_to": [
+        "PR-03"
+      ],
+      "required": true,
+      "result": "pass",
+      "proves": "A clean tree with a 4 GiB file, fan-out over 32 directories, symlinks, and an excluded subtree passes. Ten kinds of destination damage made after the last sync (same-size content change, truncation, extra, missing, file to directory, symlink target, mode, owner, mtime, one flipped byte at offset 3 GiB) each fail it; the baseline stays put and the failed pass is kept; repaired, it passes.",
+      "final_run": {
+        "run": "t3-cutover-2",
+        "started": "2026-10-19T18:49:55.755Z",
+        "finished": "2026-10-19T18:52:59.950Z",
+        "steps": 12,
+        "steps_not_ok": []
+      },
+      "earlier_runs": [
+        {
+          "run": "t3-cutover-1",
+          "started": "2026-10-19T18:46:07.616Z",
+          "finished": "2026-10-19T18:48:39.270Z",
+          "steps": 10,
+          "steps_not_ok": [],
+          "reason": "harness: the byte written into the 4 GiB file equalled the byte already there, so that file's content did not change; every other damage was reported"
+        }
+      ],
+      "steps": [
+        {
+          "note": "fixture: /mnt/qual-src-noac/cutover-2",
+          "at": "2026-10-19T18:49:15.290Z"
+        },
+        {
+          "step": "fixture-summary",
+          "command": "bash -c sudo\\ -n\\ find\\ /mnt/qual-src-noac/cutover-2\\ -printf\\ \\'%y\\\\n\\'\\ \\|\\ sort\\ \\|\\ uniq\\ -c\\;\\ sudo\\ -n\\ du\\ -s\\ --apparent-size\\ --block-size=1\\ /mnt/qual-src-noac/cutover-2",
+          "started": "2026-10-19T18:49:55.755Z",
+          "finished": "2026-10-19T18:49:59.425Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "01-fixture-summary.log",
+          "log_sha256": "b95075bf965e499957c8d9f9a5b67c536015e4adf83fab7e8adec7a9e0539140"
+        },
+        {
+          "step": "copy",
+          "command": "mg copy --src nfs://<server>/source/qual-0.2.1/cutover-2 --dst nfs://<server>/dest/qual-0.2.1/cutover-2 --work-dir /var/lib/mongoose/qual-0.2.1/cutover-2 --exclude .zfs",
+          "started": "2026-10-19T18:49:59.447Z",
+          "finished": "2026-10-19T18:50:38.269Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "02-copy.log",
+          "log_sha256": "ad51ea99464a2a87d47c05f54b1b42cc03cc5b20b44a9e63441d5a64bfb4d384"
+        },
+        {
+          "step": "sync",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/cutover-2",
+          "started": "2026-10-19T18:50:38.292Z",
+          "finished": "2026-10-19T18:51:00.245Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "03-sync.log",
+          "log_sha256": "737e391e6356855f8faf7183131d6384c74dc96210072be29549ffcdb640c783"
+        },
+        {
+          "step": "cutover-clean",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/cutover-2 --cutover",
+          "started": "2026-10-19T18:51:00.267Z",
+          "finished": "2026-10-19T18:51:27.722Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "04-cutover-clean.log",
+          "log_sha256": "a0b3efd70db4ca98cb321ccad526da924cfaec6a8502a93d94f8399135d84603"
+        },
+        {
+          "note": "damage the destination ten ways",
+          "at": "2026-10-19T18:51:27.759Z"
+        },
+        {
+          "step": "check-huge-byte-differs",
+          "command": "bash -c \\!\\ cmp\\ -s\\ \\<\\(sudo\\ -n\\ dd\\ if=/mnt/qual-src-noac/cutover-2/big/huge.bin\\ bs=1\\ skip=3221225472\\ count=1\\ status=none\\)\\ \\<\\(sudo\\ -n\\ dd\\ if=/mnt/qual-dst-noac/cutover-2/big/huge.bin\\ bs=1\\ skip=3221225472\\ count=1\\ status=none\\)",
+          "started": "2026-10-19T18:51:27.996Z",
+          "finished": "2026-10-19T18:51:28.027Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "05-check-huge-byte-differs.log",
+          "log_sha256": "11d12c9d7e23a8c600c62d036bab024d39ed55af682e6902a890c2fa9bc4211a"
+        },
+        {
+          "step": "cutover-damaged",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/cutover-2 --cutover",
+          "started": "2026-10-19T18:51:28.051Z",
+          "finished": "2026-10-19T18:52:01.810Z",
+          "exit": 1,
+          "expected": "1",
+          "ok": true,
+          "log": "06-cutover-damaged.log",
+          "log_sha256": "d1bf266d2ca94c2566af0048aa1112f1fd5e8e456077b4882d9cd9e32910eee3"
+        },
+        {
+          "step": "mismatches",
+          "command": "cat <harness>/t3-cutover-2/mismatches.jsonl",
+          "started": "2026-10-19T18:52:01.889Z",
+          "finished": "2026-10-19T18:52:01.894Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "07-mismatches.log",
+          "log_sha256": "d7508a9d51ab05cd2233dd3a1b46dc637cc76327a9d38a532a5960d089bd292e"
+        },
+        {
+          "step": "check-every-damage-reported",
+          "command": "diff /dev/fd/63 /dev/fd/62",
+          "started": "2026-10-19T18:52:01.917Z",
+          "finished": "2026-10-19T18:52:01.925Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "08-check-every-damage-reported.log",
+          "log_sha256": "29e1d7efe5aee60c1812c829615be15e3ac6d896f48c1a14ffd288d73f3982a6"
+        },
+        {
+          "step": "check-baseline-not-advanced",
+          "command": "diff <harness>/t3-cutover-2/baseline-before.json <harness>/t3-cutover-2/baseline-after.json",
+          "started": "2026-10-19T18:52:01.970Z",
+          "finished": "2026-10-19T18:52:01.976Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "09-check-baseline-not-advanced.log",
+          "log_sha256": "2dc73e703df38e8a01649fed0fee523878f5939451588b4b17e76a5f367fbc8e"
+        },
+        {
+          "step": "failed-pass-kept",
+          "command": "sudo -n jq -c \\{result\\,\\ mismatches:\\ \\(.mismatches\\ //\\ .mismatch_counts\\ //\\ null\\)\\} /var/lib/mongoose/qual-0.2.1/cutover-2/passes/pass-0003-failed-20261019T185201Z/verify.json",
+          "started": "2026-10-19T18:52:01.999Z",
+          "finished": "2026-10-19T18:52:02.026Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "10-failed-pass-kept.log",
+          "log_sha256": "c2bd2286fb4877b217e3906328e7e1d3bd7d3974c0c0670f8f7400cdf47f34e1"
+        },
+        {
+          "note": "repair the destination",
+          "at": "2026-10-19T18:52:02.052Z"
+        },
+        {
+          "step": "cutover-repaired",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/cutover-2 --cutover",
+          "started": "2026-10-19T18:52:02.269Z",
+          "finished": "2026-10-19T18:52:30.508Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "11-cutover-repaired.log",
+          "log_sha256": "7c780201ce62bd631b3ba2b7b57066675f14a33cd41d784fb2b8f3f080aa97cc"
+        },
+        {
+          "step": "check-huge-content-mismatch-reported",
+          "command": "jq -e -s any\\(.path\\ ==\\ \\\"/big/huge.bin\\\"\\ and\\ .kind\\ ==\\ \\\"content\\\"\\) <harness>/t3-cutover-2/mismatches.jsonl",
+          "started": "2026-10-19T18:52:59.941Z",
+          "finished": "2026-10-19T18:52:59.950Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "12-check-huge-content-mismatch-reported.log",
+          "log_sha256": "82ade2ea9e1c2895f31dc599883c04265815ac15ef9d3cdef253e00183899d79"
+        }
+      ]
+    },
+    {
+      "id": "alias-overlap",
+      "maps_to": [
+        "PR-04"
+      ],
+      "required": true,
+      "result": "pass",
+      "proves": "Name versus address, a spelled port with upper case, the same path through another address, and two addresses of one server (the mounted-identity probe) are each refused before any destination write; sibling paths on one export and two exports on one server copy and pass cutover.",
+      "final_run": {
+        "run": "t4-alias-2",
+        "started": "2026-10-19T18:05:12.375Z",
+        "finished": "2026-10-19T18:07:05.544Z",
+        "steps": 28,
+        "steps_not_ok": []
+      },
+      "earlier_runs": [
+        {
+          "run": "t4-alias-1",
+          "started": "2026-10-19T18:02:25.125Z",
+          "finished": "2026-10-19T18:04:12.383Z",
+          "steps": 20,
+          "steps_not_ok": [
+            "check-no-plan-two-addresses"
+          ],
+          "reason": "harness: the cached kernel mount hid the identity probe's footprint, and a no-plan check did not apply to a refusal made after the scan"
+        }
+      ],
+      "steps": [
+        {
+          "note": "fixture: /mnt/qual-src-noac/alias-2",
+          "at": "2026-10-19T18:05:12.279Z"
+        },
+        {
+          "step": "fixture-tree",
+          "command": "snap /mnt/qual-src-noac/alias-2",
+          "started": "2026-10-19T18:05:12.375Z",
+          "finished": "2026-10-19T18:05:12.419Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "01-fixture-tree.log",
+          "log_sha256": "d5aef26e06ca932e1f84ea2579de2a092a3ba673b261da298c253fd5367daca0"
+        },
+        {
+          "step": "refuse-name-vs-address",
+          "command": "mg copy --src nfs://<server>/source/qual-0.2.1/alias-2/tree --dst nfs://<vip-1>/source/qual-0.2.1/alias-2/tree/inner --work-dir /var/lib/mongoose/qual-0.2.1/alias-2-name-vs-address",
+          "started": "2026-10-19T18:05:12.478Z",
+          "finished": "2026-10-19T18:05:22.773Z",
+          "exit": 1,
+          "expected": "1",
+          "ok": true,
+          "log": "02-refuse-name-vs-address.log",
+          "log_sha256": "57caa268fe1d70a8c62f954b895fe6e7e907c581e819c2518dfe596627e59db3"
+        },
+        {
+          "step": "tree-diff-name-vs-address",
+          "command": "diff <harness>/t4-alias-2/before-name-vs-address.txt <harness>/t4-alias-2/after-name-vs-address.txt",
+          "started": "2026-10-19T18:05:22.834Z",
+          "finished": "2026-10-19T18:05:22.840Z",
+          "exit": 0,
+          "expected": "any",
+          "ok": true,
+          "log": "03-tree-diff-name-vs-address.log",
+          "log_sha256": "24d3d493067a2e97b5e2fe1b3763879ae1df822dcccefd4fe26479236b33ce52"
+        },
+        {
+          "step": "check-same-entries-name-vs-address",
+          "command": "diff /dev/fd/63 /dev/fd/62",
+          "started": "2026-10-19T18:05:22.862Z",
+          "finished": "2026-10-19T18:05:22.867Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "04-check-same-entries-name-vs-address.log",
+          "log_sha256": "29e1d7efe5aee60c1812c829615be15e3ac6d896f48c1a14ffd288d73f3982a6"
+        },
+        {
+          "step": "check-no-change-name-vs-address",
+          "command": "diff <harness>/t4-alias-2/before-name-vs-address.txt <harness>/t4-alias-2/after-name-vs-address.txt",
+          "started": "2026-10-19T18:05:22.890Z",
+          "finished": "2026-10-19T18:05:22.895Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "05-check-no-change-name-vs-address.log",
+          "log_sha256": "24d3d493067a2e97b5e2fe1b3763879ae1df822dcccefd4fe26479236b33ce52"
+        },
+        {
+          "step": "check-no-scan-or-plan-name-vs-address",
+          "command": "bash -c \\!\\ sudo\\ -n\\ test\\ -e\\ /var/lib/mongoose/qual-0.2.1/alias-2-name-vs-address/scan\\ \\&\\&\\ \\!\\ sudo\\ -n\\ test\\ -e\\ /var/lib/mongoose/qual-0.2.1/alias-2-name-vs-address/manifest.json",
+          "started": "2026-10-19T18:05:22.915Z",
+          "finished": "2026-10-19T18:05:22.948Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "06-check-no-scan-or-plan-name-vs-address.log",
+          "log_sha256": "08375a42248f42b08de69fcd7407bda146cc15e53d26eff41d660488367a8b54"
+        },
+        {
+          "step": "refuse-port-and-case",
+          "command": "mg copy --src nfs://<server>/source/qual-0.2.1/alias-2/tree --dst nfs://<SERVER>:2049/source/qual-0.2.1/alias-2 --work-dir /var/lib/mongoose/qual-0.2.1/alias-2-port-and-case",
+          "started": "2026-10-19T18:05:23.008Z",
+          "finished": "2026-10-19T18:05:23.038Z",
+          "exit": 1,
+          "expected": "1",
+          "ok": true,
+          "log": "07-refuse-port-and-case.log",
+          "log_sha256": "f9d808a987558f19de41c1ef3d94e41bf2aa3a99e825755dd0dcd978eb4ee03f"
+        },
+        {
+          "step": "tree-diff-port-and-case",
+          "command": "diff <harness>/t4-alias-2/before-port-and-case.txt <harness>/t4-alias-2/after-port-and-case.txt",
+          "started": "2026-10-19T18:05:23.104Z",
+          "finished": "2026-10-19T18:05:23.110Z",
+          "exit": 0,
+          "expected": "any",
+          "ok": true,
+          "log": "08-tree-diff-port-and-case.log",
+          "log_sha256": "caf48206ac8065560c4b951bbbcf7fe7e52e8bd0d5986cc8ede39e059f7a6646"
+        },
+        {
+          "step": "check-same-entries-port-and-case",
+          "command": "diff /dev/fd/63 /dev/fd/62",
+          "started": "2026-10-19T18:05:23.131Z",
+          "finished": "2026-10-19T18:05:23.136Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "09-check-same-entries-port-and-case.log",
+          "log_sha256": "29e1d7efe5aee60c1812c829615be15e3ac6d896f48c1a14ffd288d73f3982a6"
+        },
+        {
+          "step": "check-no-change-port-and-case",
+          "command": "diff <harness>/t4-alias-2/before-port-and-case.txt <harness>/t4-alias-2/after-port-and-case.txt",
+          "started": "2026-10-19T18:05:23.157Z",
+          "finished": "2026-10-19T18:05:23.165Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "10-check-no-change-port-and-case.log",
+          "log_sha256": "caf48206ac8065560c4b951bbbcf7fe7e52e8bd0d5986cc8ede39e059f7a6646"
+        },
+        {
+          "step": "check-no-scan-or-plan-port-and-case",
+          "command": "bash -c \\!\\ sudo\\ -n\\ test\\ -e\\ /var/lib/mongoose/qual-0.2.1/alias-2-port-and-case/scan\\ \\&\\&\\ \\!\\ sudo\\ -n\\ test\\ -e\\ /var/lib/mongoose/qual-0.2.1/alias-2-port-and-case/manifest.json",
+          "started": "2026-10-19T18:05:23.188Z",
+          "finished": "2026-10-19T18:05:23.218Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "11-check-no-scan-or-plan-port-and-case.log",
+          "log_sha256": "a50e7f0105b1c7a3cba1cafde81184672db385881928338c2a5b979ed5535a80"
+        },
+        {
+          "step": "refuse-same-path",
+          "command": "mg copy --src nfs://<server>/source/qual-0.2.1/alias-2/tree --dst nfs://<vip-3>/source/qual-0.2.1/alias-2/tree --work-dir /var/lib/mongoose/qual-0.2.1/alias-2-same-path",
+          "started": "2026-10-19T18:05:23.281Z",
+          "finished": "2026-10-19T18:05:33.645Z",
+          "exit": 1,
+          "expected": "1",
+          "ok": true,
+          "log": "12-refuse-same-path.log",
+          "log_sha256": "4d2a46f687c11fc1b9358bfa04255bbc788b32fd63abb34e811f9940010116fb"
+        },
+        {
+          "step": "tree-diff-same-path",
+          "command": "diff <harness>/t4-alias-2/before-same-path.txt <harness>/t4-alias-2/after-same-path.txt",
+          "started": "2026-10-19T18:05:33.709Z",
+          "finished": "2026-10-19T18:05:33.716Z",
+          "exit": 0,
+          "expected": "any",
+          "ok": true,
+          "log": "13-tree-diff-same-path.log",
+          "log_sha256": "0e1951a2055761a3784425cf615760697fb622079d72e3bbcbf05ab7f528ad82"
+        },
+        {
+          "step": "check-same-entries-same-path",
+          "command": "diff /dev/fd/63 /dev/fd/62",
+          "started": "2026-10-19T18:05:33.737Z",
+          "finished": "2026-10-19T18:05:33.742Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "14-check-same-entries-same-path.log",
+          "log_sha256": "29e1d7efe5aee60c1812c829615be15e3ac6d896f48c1a14ffd288d73f3982a6"
+        },
+        {
+          "step": "check-no-change-same-path",
+          "command": "diff <harness>/t4-alias-2/before-same-path.txt <harness>/t4-alias-2/after-same-path.txt",
+          "started": "2026-10-19T18:05:33.765Z",
+          "finished": "2026-10-19T18:05:33.771Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "15-check-no-change-same-path.log",
+          "log_sha256": "0e1951a2055761a3784425cf615760697fb622079d72e3bbcbf05ab7f528ad82"
+        },
+        {
+          "step": "check-no-scan-or-plan-same-path",
+          "command": "bash -c \\!\\ sudo\\ -n\\ test\\ -e\\ /var/lib/mongoose/qual-0.2.1/alias-2-same-path/scan\\ \\&\\&\\ \\!\\ sudo\\ -n\\ test\\ -e\\ /var/lib/mongoose/qual-0.2.1/alias-2-same-path/manifest.json",
+          "started": "2026-10-19T18:05:33.793Z",
+          "finished": "2026-10-19T18:05:33.829Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "16-check-no-scan-or-plan-same-path.log",
+          "log_sha256": "d49363013d4d3afe1fb45034b5e740dd79b09242b3523550db96d50269d51f25"
+        },
+        {
+          "step": "refuse-two-addresses",
+          "command": "mg copy --src nfs://<vip-1>/source/qual-0.2.1/alias-2/tree --dst nfs://<vip-3>/source/qual-0.2.1/alias-2/tree/inner --work-dir /var/lib/mongoose/qual-0.2.1/alias-2-two-addresses",
+          "started": "2026-10-19T18:05:33.897Z",
+          "finished": "2026-10-19T18:05:36.455Z",
+          "exit": 1,
+          "expected": "1",
+          "ok": true,
+          "log": "17-refuse-two-addresses.log",
+          "log_sha256": "54ff59fb96a0bcf2cc9a8c9dc270370439bbcef38a97d6af2665e05e7d40b245"
+        },
+        {
+          "step": "tree-diff-two-addresses",
+          "command": "diff <harness>/t4-alias-2/before-two-addresses.txt <harness>/t4-alias-2/after-two-addresses.txt",
+          "started": "2026-10-19T18:05:36.516Z",
+          "finished": "2026-10-19T18:05:36.522Z",
+          "exit": 1,
+          "expected": "any",
+          "ok": true,
+          "log": "18-tree-diff-two-addresses.log",
+          "log_sha256": "d2cdcd500b8260a1dea854344e037ee19250c24c7d6b06a0f4bbfcac76f4c1d5"
+        },
+        {
+          "step": "check-same-entries-two-addresses",
+          "command": "diff /dev/fd/63 /dev/fd/62",
+          "started": "2026-10-19T18:05:36.545Z",
+          "finished": "2026-10-19T18:05:36.551Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "19-check-same-entries-two-addresses.log",
+          "log_sha256": "29e1d7efe5aee60c1812c829615be15e3ac6d896f48c1a14ffd288d73f3982a6"
+        },
+        {
+          "step": "check-only-dest-root-times-two-addresses",
+          "command": "diff /dev/fd/63 /dev/fd/62",
+          "started": "2026-10-19T18:05:36.576Z",
+          "finished": "2026-10-19T18:05:36.582Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "20-check-only-dest-root-times-two-addresses.log",
+          "log_sha256": "29e1d7efe5aee60c1812c829615be15e3ac6d896f48c1a14ffd288d73f3982a6"
+        },
+        {
+          "step": "check-no-copy-started-two-addresses",
+          "command": "bash -c \\!\\ sudo\\ -n\\ test\\ -e\\ /var/lib/mongoose/qual-0.2.1/alias-2-two-addresses/progress.json",
+          "started": "2026-10-19T18:05:36.603Z",
+          "finished": "2026-10-19T18:05:36.620Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "21-check-no-copy-started-two-addresses.log",
+          "log_sha256": "e673025b4c918767d81fefcfbdf530405c8e543e2b825a7fb18337dc07ac9f93"
+        },
+        {
+          "step": "allow-sibling",
+          "command": "mg copy --src nfs://<server>/source/qual-0.2.1/alias-2/tree --dst nfs://<vip-3>/source/qual-0.2.1/alias-2/sibling --work-dir /var/lib/mongoose/qual-0.2.1/alias-2-sibling",
+          "started": "2026-10-19T18:05:36.640Z",
+          "finished": "2026-10-19T18:05:51.029Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "22-allow-sibling.log",
+          "log_sha256": "5248feecc317c5b95d7c5a57951d441609d7fabbb7b8d9c5cb7908afb208cd00"
+        },
+        {
+          "step": "check-sibling-copied",
+          "command": "diff /dev/fd/63 /dev/fd/62",
+          "started": "2026-10-19T18:05:51.051Z",
+          "finished": "2026-10-19T18:05:51.083Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "23-check-sibling-copied.log",
+          "log_sha256": "29e1d7efe5aee60c1812c829615be15e3ac6d896f48c1a14ffd288d73f3982a6"
+        },
+        {
+          "step": "allow-sibling-sync",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/alias-2-sibling",
+          "started": "2026-10-19T18:05:51.103Z",
+          "finished": "2026-10-19T18:06:02.958Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "24-allow-sibling-sync.log",
+          "log_sha256": "f209fc25bc6cf828bcaf460d18d249ca2d0766e588b71aa0e6f541b582cdc8fe"
+        },
+        {
+          "step": "allow-sibling-cutover",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/alias-2-sibling --cutover",
+          "started": "2026-10-19T18:06:02.981Z",
+          "finished": "2026-10-19T18:06:17.716Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "25-allow-sibling-cutover.log",
+          "log_sha256": "16f62658ff370e67cd18d6c3f86c019b94ec94290ef5e3391fd0a4413f7a30f4"
+        },
+        {
+          "step": "allow-two-exports",
+          "command": "mg copy --src nfs://<vip-1>/source/qual-0.2.1/alias-2/tree --dst nfs://<server>/dest/qual-0.2.1/alias-2/tree --work-dir /var/lib/mongoose/qual-0.2.1/alias-2-exports",
+          "started": "2026-10-19T18:06:17.740Z",
+          "finished": "2026-10-19T18:06:30.860Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "26-allow-two-exports.log",
+          "log_sha256": "9a19273b42db30aa76eb732b93fd97c55c940ed87e0af96880b175d77712e487"
+        },
+        {
+          "step": "allow-two-exports-sync",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/alias-2-exports",
+          "started": "2026-10-19T18:06:30.881Z",
+          "finished": "2026-10-19T18:06:45.948Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "27-allow-two-exports-sync.log",
+          "log_sha256": "713c7e697d5885fe7b868b3206f2c7da519a169b29ba6de9ce9724d85534e777"
+        },
+        {
+          "step": "allow-two-exports-cutover",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/alias-2-exports --cutover",
+          "started": "2026-10-19T18:06:45.979Z",
+          "finished": "2026-10-19T18:07:05.544Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "28-allow-two-exports-cutover.log",
+          "log_sha256": "409411d6bdccd142c525d271a138cd526c262ced90820ff6e8c8f9fc504eb6f6"
+        }
+      ]
+    },
+    {
+      "id": "crash",
+      "maps_to": [
+        "PR-05",
+        "PR-06"
+      ],
+      "required": true,
+      "result": "pass",
+      "proves": "SIGKILL in the copy, the sync delta copy, and the cutover read-back. A per-file failure recorded before the kill survives it and the next sync retries it; every rerun resumes past the leftover lock file; the baseline is not advanced by the killed sync; the cutover fails only on the stale `.partial` files the killed and failed runs left, and passes once they are moved aside.",
+      "final_run": {
+        "run": "t5-crash-3",
+        "started": "2026-10-19T18:41:38.607Z",
+        "finished": "2026-10-19T18:45:05.445Z",
+        "steps": 21,
+        "steps_not_ok": []
+      },
+      "earlier_runs": [
+        {
+          "run": "t5-crash-1",
+          "started": "2026-10-19T18:31:43.389Z",
+          "finished": "2026-10-19T18:34:43.284Z",
+          "steps": 18,
+          "steps_not_ok": [
+            "check-failure-record-names-blocker",
+            "cutover-resume"
+          ],
+          "reason": "harness: the failure-record check looked for a plain path where the record stores path_b64, and the stale `.partial` files the kills leave were not yet expected"
+        },
+        {
+          "run": "t5-crash-2",
+          "started": "2026-10-19T18:35:34.541Z",
+          "finished": "2026-10-19T18:37:25.847Z",
+          "steps": 13,
+          "steps_not_ok": [],
+          "reason": "interrupted when the operator's session dropped; abandoned"
+        }
+      ],
+      "steps": [
+        {
+          "step": "copy-killed",
+          "command": "mongoose copy --src nfs://<server>/source/qual-0.2.1/bulk --dst nfs://<server>/dest/qual-0.2.1/crash-3 --work-dir /var/lib/mongoose/qual-0.2.1/crash-3 --parallel 2",
+          "started": "2026-10-19T18:41:38.607Z",
+          "finished": "2026-10-19T18:41:59.600Z",
+          "exit": 137,
+          "expected": "137",
+          "ok": true,
+          "log": "01-copy-killed.log",
+          "log_sha256": "f431339fbd0ff9839d1bb2ed10c744da2721f6c0876e5261ed8ef832657c036e",
+          "background": true
+        },
+        {
+          "step": "progress-after-kill",
+          "command": "sudo -n jq -c \\{shards_total\\,\\ completed:\\ \\(.completed_shards\\ \\|\\ length\\)\\} /var/lib/mongoose/qual-0.2.1/crash-3/progress.json",
+          "started": "2026-10-19T18:41:59.613Z",
+          "finished": "2026-10-19T18:41:59.633Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "02-progress-after-kill.log",
+          "log_sha256": "9615cd3eac6e6bc0c0080f87a4d884034f0a944b21f8bea10be2a05e4d2cae30"
+        },
+        {
+          "step": "check-copy-was-incomplete",
+          "command": "bash -c \\(\\(\\ \\$\\(sudo\\ -n\\ jq\\ \\'.completed_shards\\ \\|\\ length\\'\\ /var/lib/mongoose/qual-0.2.1/crash-3/progress.json\\)\\ \\<\\ 32\\ \\)\\)",
+          "started": "2026-10-19T18:41:59.653Z",
+          "finished": "2026-10-19T18:41:59.676Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "03-check-copy-was-incomplete.log",
+          "log_sha256": "df06065d9e04b0dbc0735e71da5170c571fb5c8efbc18682b5f38cf52df003fb"
+        },
+        {
+          "note": "blocker d00/f0004.dat is in shard part-r01-00000",
+          "at": "2026-10-19T18:41:59.778Z"
+        },
+        {
+          "step": "check-blocker-shard-completed",
+          "command": "sudo -n jq -e --arg s canonical/part-r01-00000.parquet .completed_shards\\ \\|\\ index\\(\\$s\\) /var/lib/mongoose/qual-0.2.1/crash-3/progress.json",
+          "started": "2026-10-19T18:41:59.788Z",
+          "finished": "2026-10-19T18:41:59.811Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "04-check-blocker-shard-completed.log",
+          "log_sha256": "56bd6f31d39fe3c9aed3dde87ed4903c55474c69c63254db0410a24ff5d61357"
+        },
+        {
+          "step": "failure-record",
+          "command": "sudo -n cat /var/lib/mongoose/qual-0.2.1/crash-3/failures/part-r01-00000.jsonl",
+          "started": "2026-10-19T18:41:59.838Z",
+          "finished": "2026-10-19T18:41:59.856Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "05-failure-record.log",
+          "log_sha256": "88ef4617b389079cdd11c59c0ccbec0c59075f3527f69f0f7a48b3fa3e07a0e9"
+        },
+        {
+          "step": "check-failure-record-names-blocker",
+          "command": "bash -c sudo\\ -n\\ jq\\ -r\\ \\'.path_b64\\ \\|\\ @base64d\\'\\ /var/lib/mongoose/qual-0.2.1/crash-3/failures/part-r01-00000.jsonl\\ \\|\\ grep\\ -qx\\ /d00/f0004.dat",
+          "started": "2026-10-19T18:41:59.879Z",
+          "finished": "2026-10-19T18:41:59.901Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "06-check-failure-record-names-blocker.log",
+          "log_sha256": "8adbec9f7c01b5c8301a4dc172d44ed4d5af8a86b5408994cd6f6e9cfdc4c1f1"
+        },
+        {
+          "step": "stale-lock-file",
+          "command": "sudo -n cat /var/lib/mongoose/qual-0.2.1/crash-3/.mongoose.lock",
+          "started": "2026-10-19T18:41:59.921Z",
+          "finished": "2026-10-19T18:41:59.939Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "07-stale-lock-file.log",
+          "log_sha256": "3c21465b46954716a7605db627deb90b125da3e8dc901286f9ea5172ae899a63"
+        },
+        {
+          "step": "copy-resume",
+          "command": "mg copy --src nfs://<server>/source/qual-0.2.1/bulk --dst nfs://<server>/dest/qual-0.2.1/crash-3 --work-dir /var/lib/mongoose/qual-0.2.1/crash-3 --parallel 2",
+          "started": "2026-10-19T18:41:59.960Z",
+          "finished": "2026-10-19T18:43:08.624Z",
+          "exit": 2,
+          "expected": "2",
+          "ok": true,
+          "log": "08-copy-resume.log",
+          "log_sha256": "b00cdc006242119a9e2348bb667a57f5b1b64a80c25e967543e668486de4d14e"
+        },
+        {
+          "step": "check-copy-now-complete",
+          "command": "bash -c \\(\\(\\ \\$\\(sudo\\ -n\\ jq\\ \\'.completed_shards\\ \\|\\ length\\'\\ /var/lib/mongoose/qual-0.2.1/crash-3/progress.json\\)\\ ==\\ 32\\ \\)\\)",
+          "started": "2026-10-19T18:43:08.648Z",
+          "finished": "2026-10-19T18:43:08.671Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "09-check-copy-now-complete.log",
+          "log_sha256": "56ccfc827c1b1f2f7e3bc5068cad5f5767158cd813a129c74565685126aa389b"
+        },
+        {
+          "note": "move the blocker aside (out of the job's tree), change the source, SIGKILL the sync mid-copy",
+          "at": "2026-10-19T18:43:08.692Z"
+        },
+        {
+          "step": "baseline-before-sync",
+          "command": "bash -c sudo\\ -n\\ cat\\ /var/lib/mongoose/qual-0.2.1/crash-3/baseline.json\\ 2\\>/dev/null\\ \\|\\|\\ echo\\ absent",
+          "started": "2026-10-19T18:43:19.158Z",
+          "finished": "2026-10-19T18:43:19.181Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "10-baseline-before-sync.log",
+          "log_sha256": "a47155112abddba562748ed911cb6366c3633229eeb4caf52134e17b5ca1ccd1"
+        },
+        {
+          "step": "sync-killed",
+          "command": "mongoose sync --work-dir /var/lib/mongoose/qual-0.2.1/crash-3 --parallel 2",
+          "started": "2026-10-19T18:43:19.208Z",
+          "finished": "2026-10-19T18:43:32.105Z",
+          "exit": 137,
+          "expected": "137",
+          "ok": true,
+          "log": "11-sync-killed.log",
+          "log_sha256": "13ebed04998a878c02a43ae3b63d75c66f30b0a6b173f927e9632fe5e8d44924",
+          "background": true
+        },
+        {
+          "step": "baseline-after-kill",
+          "command": "bash -c sudo\\ -n\\ cat\\ /var/lib/mongoose/qual-0.2.1/crash-3/baseline.json\\ 2\\>/dev/null\\ \\|\\|\\ echo\\ absent",
+          "started": "2026-10-19T18:43:32.125Z",
+          "finished": "2026-10-19T18:43:32.149Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "12-baseline-after-kill.log",
+          "log_sha256": "a47155112abddba562748ed911cb6366c3633229eeb4caf52134e17b5ca1ccd1"
+        },
+        {
+          "step": "check-baseline-not-advanced",
+          "command": "diff /dev/fd/63 /dev/fd/62",
+          "started": "2026-10-19T18:43:32.177Z",
+          "finished": "2026-10-19T18:43:32.183Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "13-check-baseline-not-advanced.log",
+          "log_sha256": "29e1d7efe5aee60c1812c829615be15e3ac6d896f48c1a14ffd288d73f3982a6"
+        },
+        {
+          "step": "sync-resume",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/crash-3",
+          "started": "2026-10-19T18:43:32.206Z",
+          "finished": "2026-10-19T18:43:48.711Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "14-sync-resume.log",
+          "log_sha256": "bfe38b817175aa4f91c34c1fc3d950366b38ce406ccfe4fe1b9e727ab39167d0"
+        },
+        {
+          "step": "check-blocker-retried-and-copied",
+          "command": "sudo -n cmp /mnt/qual-src-noac/bulk/d00/f0004.dat /mnt/qual-dst-noac/crash-3/d00/f0004.dat",
+          "started": "2026-10-19T18:43:48.731Z",
+          "finished": "2026-10-19T18:43:48.764Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "15-check-blocker-retried-and-copied.log",
+          "log_sha256": "818af6abdd283be76fadcec21f9b444bd9760654a6a419848f48d89c0a787941"
+        },
+        {
+          "step": "sync-quiet",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/crash-3",
+          "started": "2026-10-19T18:43:48.790Z",
+          "finished": "2026-10-19T18:44:00.845Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "16-sync-quiet.log",
+          "log_sha256": "218ae53d183ab72bde6c40abb2deb3f1765c9a8e9039b7c06efb515380115332"
+        },
+        {
+          "step": "cutover-killed",
+          "command": "mongoose sync --work-dir /var/lib/mongoose/qual-0.2.1/crash-3 --cutover --parallel 2",
+          "started": "2026-10-19T18:44:00.873Z",
+          "finished": "2026-10-19T18:44:19.999Z",
+          "exit": 137,
+          "expected": "137",
+          "ok": true,
+          "log": "17-cutover-killed.log",
+          "log_sha256": "b62dbc3c6ae7fb1ebb139bc84001819216fe844246aa33a5028fae15b6728d9f",
+          "background": true
+        },
+        {
+          "step": "cutover-resume",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/crash-3 --cutover",
+          "started": "2026-10-19T18:44:20.014Z",
+          "finished": "2026-10-19T18:44:41.840Z",
+          "exit": 1,
+          "expected": "1",
+          "ok": true,
+          "log": "18-cutover-resume.log",
+          "log_sha256": "c1974e10cd6882f435462a9abae0c55b7e97403a6396d06bd6a357dece94664b"
+        },
+        {
+          "step": "mismatches",
+          "command": "cat <harness>/t5-crash-3/mismatches.jsonl",
+          "started": "2026-10-19T18:44:41.905Z",
+          "finished": "2026-10-19T18:44:41.910Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "19-mismatches.log",
+          "log_sha256": "270f49ceca1ca98b1f017a243b1fc7a80bef0642a49e43d3f059f58d36264397"
+        },
+        {
+          "step": "check-only-stale-partials-of-killed-runs",
+          "command": "bash -c jq\\ -e\\ -s\\ --arg\\ re\\ \\'/\\\\.\\[\\^/\\]+\\\\.<client>\\\\.\\(2913802\\|2918730\\|2924128\\)\\\\.partial\\$\\'\\ \\'length\\ \\>\\ 0\\ and\\ all\\(.kind\\ ==\\ \\\"extra\\\"\\ and\\ \\(.path\\ \\|\\ test\\(\\$re\\)\\)\\)\\'\\ <harness>/t5-crash-3/mismatches.jsonl",
+          "started": "2026-10-19T18:44:41.954Z",
+          "finished": "2026-10-19T18:44:42.006Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "20-check-only-stale-partials-of-killed-runs.log",
+          "log_sha256": "8c6e34c651e62844337f2ebf5c58e10da5058c6307b8f9be852539a89bbf3631"
+        },
+        {
+          "note": "move the stale .partial files aside",
+          "at": "2026-10-19T18:44:42.030Z"
+        },
+        {
+          "step": "cutover-after-cleanup",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/crash-3 --cutover",
+          "started": "2026-10-19T18:44:42.112Z",
+          "finished": "2026-10-19T18:45:05.445Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "21-cutover-after-cleanup.log",
+          "log_sha256": "884cf9443f40f009ca2dcd44d6c63536df6e57bbdd5f985c34d62cc57f874023"
+        }
+      ]
+    },
+    {
+      "id": "concurrency",
+      "maps_to": [
+        "PR-06"
+      ],
+      "required": true,
+      "result": "pass",
+      "proves": "While a copy holds a work dir, a second copy and a sync fail at once naming the owner (pid, host, command, start time) and start nothing; two copies racing to create one new work dir leave exactly one running.",
+      "final_run": {
+        "run": "t6-concurrency-2",
+        "started": "2026-10-19T18:27:23.584Z",
+        "finished": "2026-10-19T18:30:45.450Z",
+        "steps": 14,
+        "steps_not_ok": []
+      },
+      "earlier_runs": [
+        {
+          "run": "t6-concurrency-1",
+          "started": "2026-10-19T18:23:25.285Z",
+          "finished": "2026-10-19T18:26:47.002Z",
+          "steps": 14,
+          "steps_not_ok": [
+            "check-contenders-name-the-owner"
+          ],
+          "reason": "harness: the owner-name check read the wrong log files"
+        }
+      ],
+      "steps": [
+        {
+          "step": "lock-file",
+          "command": "sudo -n cat /var/lib/mongoose/qual-0.2.1/conc-2/.mongoose.lock",
+          "started": "2026-10-19T18:27:23.584Z",
+          "finished": "2026-10-19T18:27:23.606Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "02-lock-file.log",
+          "log_sha256": "439a17a702bca1b588355caedddddf38a6212165af555fbac56ddcd6d884773b"
+        },
+        {
+          "step": "second-copy",
+          "command": "timeout 60 sudo -n <attested-binary> copy --src nfs://<server>/source/qual-0.2.1/bulk --dst nfs://<server>/dest/qual-0.2.1/conc-2 --work-dir /var/lib/mongoose/qual-0.2.1/conc-2 --parallel 2",
+          "started": "2026-10-19T18:27:23.661Z",
+          "finished": "2026-10-19T18:27:23.687Z",
+          "exit": 1,
+          "expected": "1",
+          "ok": true,
+          "log": "03-second-copy.log",
+          "log_sha256": "211cea416c0fd70cce70137d21fb9e53d535f2fac49b89fc0ec1e1b2abd87b55"
+        },
+        {
+          "step": "second-sync",
+          "command": "timeout 60 sudo -n <attested-binary> sync --work-dir /var/lib/mongoose/qual-0.2.1/conc-2",
+          "started": "2026-10-19T18:27:23.710Z",
+          "finished": "2026-10-19T18:27:23.732Z",
+          "exit": 1,
+          "expected": "1",
+          "ok": true,
+          "log": "04-second-sync.log",
+          "log_sha256": "e3c8fc0985cc002f1d281c10a290c972eaa765a423050cc344de7904e56ca4f8"
+        },
+        {
+          "step": "check-contenders-started-nothing",
+          "command": "diff <harness>/t6-concurrency-2/state-before.txt <harness>/t6-concurrency-2/state-after.txt",
+          "started": "2026-10-19T18:27:23.780Z",
+          "finished": "2026-10-19T18:27:23.785Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "05-check-contenders-started-nothing.log",
+          "log_sha256": "a1e52ad584925246a224df4c305c1e17d7de505229feca637ace3e2a8cd9232b"
+        },
+        {
+          "step": "check-contenders-name-the-owner",
+          "command": "bash -c grep\\ -q\\ \\\"in\\ use\\ \\(pid=2812801\\$\\\"\\ <harness>/t6-concurrency-2/03-second-copy.log\\ \\&\\&\\ grep\\ -q\\ \\\"in\\ use\\ \\(pid=2812801\\$\\\"\\ <harness>/t6-concurrency-2/04-second-sync.log",
+          "started": "2026-10-19T18:27:23.818Z",
+          "finished": "2026-10-19T18:27:23.828Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "06-check-contenders-name-the-owner.log",
+          "log_sha256": "6a14dc4b704daef02e7826132fa9f86daa3028d74473ccd918579e43b3bd6b8e"
+        },
+        {
+          "step": "check-owner-still-running",
+          "command": "sudo -n kill -0 2812801",
+          "started": "2026-10-19T18:27:23.848Z",
+          "finished": "2026-10-19T18:27:23.868Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "07-check-owner-still-running.log",
+          "log_sha256": "fe96abc522a650778b1683cdb4f421a45410ab1a255e6c2456a12e28e4e32fb2"
+        },
+        {
+          "step": "copy-owner",
+          "command": "mongoose copy --src nfs://<server>/source/qual-0.2.1/bulk --dst nfs://<server>/dest/qual-0.2.1/conc-2 --work-dir /var/lib/mongoose/qual-0.2.1/conc-2 --parallel 2",
+          "started": "2026-10-19T18:27:06.766Z",
+          "finished": "2026-10-19T18:28:21.664Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "01-copy-owner.log",
+          "log_sha256": "6ecc404ac705a3146ff85f3216c084169c669c202e341e26daf17535a33f8b93",
+          "background": true
+        },
+        {
+          "step": "sync",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/conc-2",
+          "started": "2026-10-19T18:28:21.677Z",
+          "finished": "2026-10-19T18:28:33.715Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "08-sync.log",
+          "log_sha256": "28dc154eaf74311403c0c155d671db72be2d8f0232e9c85df99c402638e981ef"
+        },
+        {
+          "step": "cutover",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/conc-2 --cutover",
+          "started": "2026-10-19T18:28:33.736Z",
+          "finished": "2026-10-19T18:28:53.902Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "09-cutover.log",
+          "log_sha256": "a2545d756cfca0044ec75564ae9714ccb3ab3161f8fa9a5e69520d72fb2e33c6"
+        },
+        {
+          "note": "two copies race to create one new work dir",
+          "at": "2026-10-19T18:28:53.925Z"
+        },
+        {
+          "step": "race-a",
+          "command": "mongoose copy --src nfs://<server>/source/qual-0.2.1/bulk --dst nfs://<server>/dest/qual-0.2.1/conc-2-race --work-dir /var/lib/mongoose/qual-0.2.1/conc-2-race --parallel 2",
+          "started": "2026-10-19T18:28:53.935Z",
+          "finished": "2026-10-19T18:30:12.718Z",
+          "exit": 0,
+          "expected": "any",
+          "ok": true,
+          "log": "10-race-a.log",
+          "log_sha256": "7d089b7d8e7981b6f94b3c865d82cdb3d073867e163732aa5b3026131ac536b7",
+          "background": true
+        },
+        {
+          "step": "race-b",
+          "command": "mongoose copy --src nfs://<server>/source/qual-0.2.1/bulk --dst nfs://<server>/dest/qual-0.2.1/conc-2-race --work-dir /var/lib/mongoose/qual-0.2.1/conc-2-race --parallel 2",
+          "started": "2026-10-19T18:28:54.056Z",
+          "finished": "2026-10-19T18:30:12.739Z",
+          "exit": 1,
+          "expected": "any",
+          "ok": true,
+          "log": "11-race-b.log",
+          "log_sha256": "00e915899be4b1808e816c59c3036122b3746f2b766e2c1c0d54ef17b9cfb854",
+          "background": true
+        },
+        {
+          "step": "check-exactly-one-ran",
+          "command": "bash -c \\[\\[\\ \\\"0\\ 1\\\"\\ ==\\ \\'0\\ 1\\'\\ \\|\\|\\ \\\"0\\ 1\\\"\\ ==\\ \\'1\\ 0\\'\\ \\]\\]",
+          "started": "2026-10-19T18:30:12.757Z",
+          "finished": "2026-10-19T18:30:12.766Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "12-check-exactly-one-ran.log",
+          "log_sha256": "73df8e0cdf569ad3dfe51395bd7a634a3a037c3925fc086e9319abad23050202"
+        },
+        {
+          "step": "race-sync",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/conc-2-race",
+          "started": "2026-10-19T18:30:12.793Z",
+          "finished": "2026-10-19T18:30:25.249Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "13-race-sync.log",
+          "log_sha256": "d746c100b446903721fb92e58ec4b364e33cee9ee3307d88b10b814b5b0c5d49"
+        },
+        {
+          "step": "race-cutover",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/conc-2-race --cutover",
+          "started": "2026-10-19T18:30:25.271Z",
+          "finished": "2026-10-19T18:30:45.450Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "14-race-cutover.log",
+          "log_sha256": "b5493a0aa50f7a09199dac8e0d5cd1fdf4b84eb0c04b3c2e40be7436238d7263"
+        }
+      ]
+    },
+    {
+      "id": "torn-copy",
+      "maps_to": [
+        "PR-07"
+      ],
+      "required": true,
+      "result": "pass",
+      "proves": "Six 1 GiB files rewritten in place while the shipped synchronous raw-filehandle mover reads them are all counted as torn with durable TORN_COPY records; the next sync recopies them with 0 torn; the cutover passes.",
+      "final_run": {
+        "run": "t7-torn-1",
+        "started": "2026-10-19T18:53:31.682Z",
+        "finished": "2026-10-19T18:55:48.560Z",
+        "steps": 10,
+        "steps_not_ok": []
+      },
+      "earlier_runs": [],
+      "steps": [
+        {
+          "note": "fixture: 6 x 1 GiB",
+          "at": "2026-10-19T18:53:00.074Z"
+        },
+        {
+          "note": "index built; mutating the source while it is copied",
+          "at": "2026-10-19T18:53:54.445Z"
+        },
+        {
+          "step": "copy",
+          "command": "mongoose copy --src nfs://<server>/source/qual-0.2.1/torn-1 --dst nfs://<server>/dest/qual-0.2.1/torn-1 --work-dir /var/lib/mongoose/qual-0.2.1/torn-1 --parallel 2",
+          "started": "2026-10-19T18:53:31.682Z",
+          "finished": "2026-10-19T18:54:23.454Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "01-copy.log",
+          "log_sha256": "dcf7257f35442a5f2b93b0c7ef99d83c0d28549f53f5c3dd7ed5768f284db012",
+          "background": true
+        },
+        {
+          "step": "mutator",
+          "command": "cat <harness>/t7-torn-1/mutate.out",
+          "started": "2026-10-19T18:54:23.518Z",
+          "finished": "2026-10-19T18:54:23.523Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "02-mutator.log",
+          "log_sha256": "c44b0baf4a14df0ef95524d8d6be91155f648f841f2d5e37b9482a98f23e0a86"
+        },
+        {
+          "step": "copy-summary",
+          "command": "grep -E \\^complete: <harness>/t7-torn-1/01-copy.log",
+          "started": "2026-10-19T18:54:23.545Z",
+          "finished": "2026-10-19T18:54:23.551Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "03-copy-summary.log",
+          "log_sha256": "ed58c1ad3757ae10b4b47fa66bba3be90efe2428abae7be78abbb80d870fb9c5"
+        },
+        {
+          "step": "check-some-torn",
+          "command": "bash -c grep\\ -E\\ \\'\\^complete:\\'\\ <harness>/t7-torn-1/01-copy.log\\ \\|\\ grep\\ -qE\\ \\'\\\\\\(\\(\\[1-9\\]\\[0-9\\]\\*\\)\\ torn\\\\\\)\\'",
+          "started": "2026-10-19T18:54:23.579Z",
+          "finished": "2026-10-19T18:54:23.589Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "04-check-some-torn.log",
+          "log_sha256": "78de31f5bcbc85ad398a543b0eff7fd36daa29fdb2e4ad1aa0ad2aa47a886d8f"
+        },
+        {
+          "step": "torn-records",
+          "command": "jq -c .\\ +\\ \\{path:\\ \\(.path_b64\\ \\|\\ @base64d\\)\\} <harness>/t7-torn-1/downgrades.jsonl",
+          "started": "2026-10-19T18:54:23.625Z",
+          "finished": "2026-10-19T18:54:23.633Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "05-torn-records.log",
+          "log_sha256": "8d7dcd9988743d9fbd83d5a8887e9de75fda2d6183421e242a400648a2090406"
+        },
+        {
+          "step": "check-torn-records-match-count",
+          "command": "bash -c n=\\$\\(grep\\ -oE\\ \\'\\\\\\(\\(\\[0-9\\]+\\)\\ torn\\\\\\)\\'\\ <harness>/t7-torn-1/01-copy.log\\ \\|\\ grep\\ -oE\\ \\'\\[0-9\\]+\\'\\)\\;\\ \\[\\[\\ \\$\\(grep\\ -c\\ -i\\ torn\\ <harness>/t7-torn-1/downgrades.jsonl\\)\\ ==\\ \\$n\\ \\]\\]",
+          "started": "2026-10-19T18:54:23.659Z",
+          "finished": "2026-10-19T18:54:23.675Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "06-check-torn-records-match-count.log",
+          "log_sha256": "efcc4fb37166662574f246605c255311a0c2a44dd0257ef5b0350ba3ec1d6596"
+        },
+        {
+          "step": "sync",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/torn-1",
+          "started": "2026-10-19T18:54:23.695Z",
+          "finished": "2026-10-19T18:55:08.422Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "07-sync.log",
+          "log_sha256": "8d04370ec23bc43606b3ad0b663c12cb4317d079cc959abb48599726f232e0eb"
+        },
+        {
+          "step": "check-sync-recopied-torn",
+          "command": "bash -c grep\\ -E\\ \\'\\^complete:\\'\\ <harness>/t7-torn-1/07-sync.log\\ \\|\\ grep\\ -q\\ \\'\\(0\\ torn\\)\\'",
+          "started": "2026-10-19T18:55:08.460Z",
+          "finished": "2026-10-19T18:55:08.474Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "08-check-sync-recopied-torn.log",
+          "log_sha256": "25f92a8976efb300653fcdfc8d9d7b160917a76dbab4aa643dda9f893b63d295"
+        },
+        {
+          "step": "sync-quiet",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/torn-1",
+          "started": "2026-10-19T18:55:08.504Z",
+          "finished": "2026-10-19T18:55:25.551Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "09-sync-quiet.log",
+          "log_sha256": "94ba8355c576ec850b58eb9f22b1ab07f1e503c43aea5afd7e47cca59b5e5bd7"
+        },
+        {
+          "step": "cutover",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/torn-1 --cutover",
+          "started": "2026-10-19T18:55:25.574Z",
+          "finished": "2026-10-19T18:55:48.560Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "10-cutover.log",
+          "log_sha256": "42802fbaceed11cf9767fcb06f4e5839d9964b17293a8df5e97c9e292ea59d30"
+        }
+      ]
+    },
+    {
+      "id": "special-files",
+      "maps_to": [
+        "special-file safety"
+      ],
+      "required": true,
+      "result": "pass",
+      "proves": "The real-NFS procedure of docs/SPECIAL_FILE_TYPE_SAFETY_HANDOFF.md with the release binary: walker and canonical type evidence, FIFOs and the socket not copied and recorded, the cutover failing only for them, a wrong type reported as file_type, and, with every node recreated, a passing cutover.",
+      "notes": "Steps 13 and 20 (canonical-tags) failed on harness query errors, and the walker-row dump in the script copied nothing (walk.parquet is a directory). Steps 19 to 22 reran both inspections on the kept failed pass with the queries in walker-rows.sql and canonical-tags.sql; the committed t8-special.sh has those queries.",
+      "final_run": {
+        "run": "t8-special-1",
+        "started": "2026-10-19T18:56:22.385Z",
+        "finished": "2026-10-19T18:58:15.429Z",
+        "steps": 22,
+        "steps_not_ok": [
+          "canonical-tags",
+          "canonical-tags"
+        ]
+      },
+      "earlier_runs": [],
+      "steps": [
+        {
+          "step": "tools-at-tag",
+          "command": "bash -c cd\\ <repo>/docs/qualification/tools\\ \\&\\&\\ git\\ rev-parse\\ HEAD\\ \\&\\&\\ git\\ status\\ --porcelain\\ .\\ \\&\\&\\ sha256sum\\ \\*.py",
+          "started": "2026-10-19T18:56:22.385Z",
+          "finished": "2026-10-19T18:56:22.410Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "01-tools-at-tag.log",
+          "log_sha256": "8779ba91f06072c37fc05e1a5ebaec4ba45522265641af2a85344643536c4674"
+        },
+        {
+          "step": "make-tree",
+          "command": "sudo -n python3 -I <repo>/docs/qualification/tools/make-special-tree.py /mnt/qual-src-noac/special-1",
+          "started": "2026-10-19T18:56:22.434Z",
+          "finished": "2026-10-19T18:56:22.584Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "02-make-tree.log",
+          "log_sha256": "85aa5d4ac5b96b3bfe7d9946e2d8e938933abdc2af8ea2c66a4bd702c79981b5"
+        },
+        {
+          "step": "copy",
+          "command": "mg copy --src nfs://<server>/source/qual-0.2.1/special-1 --dst nfs://<server>/dest/qual-0.2.1/special-1 --work-dir /var/lib/mongoose/qual-0.2.1/special-1",
+          "started": "2026-10-19T18:56:22.625Z",
+          "finished": "2026-10-19T18:56:40.267Z",
+          "exit": 0,
+          "expected": "any",
+          "ok": true,
+          "log": "03-copy.log",
+          "log_sha256": "f15c989f5cecec5ba3be7c83efd4559f8ebd092284eb2a85ff3c26f13633739f"
+        },
+        {
+          "step": "counters",
+          "command": "sudo -n jq -c \\{files_ok\\,\\ files_failed\\,\\ files_special_not_copied\\,\\ bytes_moved\\} /var/lib/mongoose/qual-0.2.1/special-1/progress.json",
+          "started": "2026-10-19T18:56:40.293Z",
+          "finished": "2026-10-19T18:56:40.313Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "04-counters.log",
+          "log_sha256": "8ad1e043fcf55f613d0c84aefb78861fc553db2c5b505ce209e69b2057f68452"
+        },
+        {
+          "step": "dest-tree",
+          "command": "sudo -n find /mnt/qual-dst-noac/special-1 -mindepth 1 -printf %y\\ %m\\ %U:%G\\ %s\\ %P\\\\n",
+          "started": "2026-10-19T18:56:40.335Z",
+          "finished": "2026-10-19T18:56:40.369Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "05-dest-tree.log",
+          "log_sha256": "86e0e1db57ff1a04d3007a41428ca5ebe7ab000ddcb559eef630051f49972236"
+        },
+        {
+          "step": "check-specials-absent",
+          "command": "bash -c \\!\\ sudo\\ -n\\ test\\ -e\\ /mnt/qual-dst-noac/special-1/pipe.fifo\\ -o\\ -e\\ /mnt/qual-dst-noac/special-1/sock.sock\\ -o\\ -e\\ /mnt/qual-dst-noac/special-1/nested/inner.fifo",
+          "started": "2026-10-19T18:56:40.396Z",
+          "finished": "2026-10-19T18:56:40.422Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "06-check-specials-absent.log",
+          "log_sha256": "65d13a88ae1496d3dcff8dfa7fd18e128d8374f750866147dad7a3b6ddb6284d"
+        },
+        {
+          "step": "check-control-identical",
+          "command": "sudo -n cmp /mnt/qual-src-noac/special-1/control.txt /mnt/qual-dst-noac/special-1/control.txt",
+          "started": "2026-10-19T18:56:40.442Z",
+          "finished": "2026-10-19T18:56:40.469Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "07-check-control-identical.log",
+          "log_sha256": "efce20b32aaa3979d96287273bec2020b2578862cabac983d342d0acf1815a24"
+        },
+        {
+          "step": "omission-records",
+          "command": "jq -c .\\ +\\ \\{path:\\ \\(.path_b64\\ \\|\\ @base64d\\)\\} <harness>/t8-special-1/downgrades.jsonl",
+          "started": "2026-10-19T18:56:40.509Z",
+          "finished": "2026-10-19T18:56:40.517Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "08-omission-records.log",
+          "log_sha256": "975a5e69d196fa85c9394ddf1f14ac554e4e2207c02569e953a42000fcc7a5e9"
+        },
+        {
+          "step": "check-omissions-are-the-specials",
+          "command": "diff /dev/fd/63 /dev/fd/62",
+          "started": "2026-10-19T18:56:40.545Z",
+          "finished": "2026-10-19T18:56:40.552Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "09-check-omissions-are-the-specials.log",
+          "log_sha256": "29e1d7efe5aee60c1812c829615be15e3ac6d896f48c1a14ffd288d73f3982a6"
+        },
+        {
+          "step": "cutover-specials-absent",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/special-1 --cutover",
+          "started": "2026-10-19T18:56:40.571Z",
+          "finished": "2026-10-19T18:56:58.620Z",
+          "exit": 1,
+          "expected": "1",
+          "ok": true,
+          "log": "10-cutover-specials-absent.log",
+          "log_sha256": "484277c8393fadfecfbabce0b38b85f333fa490c88dcbcc072e57a945d8aea31"
+        },
+        {
+          "step": "mismatches-1",
+          "command": "cat <harness>/t8-special-1/mismatches-1.jsonl",
+          "started": "2026-10-19T18:56:58.679Z",
+          "finished": "2026-10-19T18:56:58.685Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "11-mismatches-1.log",
+          "log_sha256": "4469894edf4929a74bf6a7f84ba67797f89a5bfbb84063360f67cc8b47139661"
+        },
+        {
+          "step": "check-only-special-not-copied",
+          "command": "jq -e -s length\\ ==\\ 3\\ and\\ all\\(.kind\\ ==\\ \\\"special_not_copied\\\"\\) <harness>/t8-special-1/mismatches-1.jsonl",
+          "started": "2026-10-19T18:56:58.710Z",
+          "finished": "2026-10-19T18:56:58.717Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "12-check-only-special-not-copied.log",
+          "log_sha256": "9e443c74f30323ed5d72a319f4802fa986ff36dad26a93ba9e389fe92231761b"
+        },
+        {
+          "step": "canonical-tags",
+          "command": "duckdb -c select\\ decode\\(path\\)\\ path\\,\\ file_type\\ tag\\,\\ printf\\(\\'%06o\\'\\,\\ mode\\)\\ mode\\,\\ printf\\(\\'%03o\\'\\,\\ mode\\ \\>\\>\\ 12\\)\\ s_ifmt\\ from\\ read_parquet\\(\\'<harness>/t8-special-1/canon.NQ35/\\*.parquet\\'\\)\\ order\\ by\\ 1",
+          "started": "2026-10-19T18:56:58.809Z",
+          "finished": "2026-10-19T18:56:59.267Z",
+          "exit": 1,
+          "expected": "0",
+          "ok": false,
+          "log": "13-canonical-tags.log",
+          "log_sha256": "004b8d525063963264d091050f44b450eb516d323029402561c3dcebb1647664"
+        },
+        {
+          "step": "recreate-on-dest",
+          "command": "sudo -n python3 -I <repo>/docs/qualification/tools/recreate-on-dest.py /mnt/qual-dst-noac/special-1",
+          "started": "2026-10-19T18:56:59.289Z",
+          "finished": "2026-10-19T18:56:59.393Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "14-recreate-on-dest.log",
+          "log_sha256": "75453824059694c76a0e90a25df891678e9dde4e16e7fe2e474ac77ab72a212e"
+        },
+        {
+          "step": "cutover-wrong-type",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/special-1 --cutover",
+          "started": "2026-10-19T18:56:59.416Z",
+          "finished": "2026-10-19T18:57:14.973Z",
+          "exit": 1,
+          "expected": "1",
+          "ok": true,
+          "log": "15-cutover-wrong-type.log",
+          "log_sha256": "6a9c9d53d66ff1dc5dee401a5f2559cda962fd5e7a7afedd823fef022e2f59c2"
+        },
+        {
+          "step": "mismatches-2",
+          "command": "cat <harness>/t8-special-1/mismatches-2.jsonl",
+          "started": "2026-10-19T18:57:15.041Z",
+          "finished": "2026-10-19T18:57:15.045Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "16-mismatches-2.log",
+          "log_sha256": "c0564d2aaf46522e903dc286c17999a9ea167d5db94ba6d82291d1953f2aeee9"
+        },
+        {
+          "step": "check-only-inner-fifo-file-type",
+          "command": "jq -e -s length\\ ==\\ 1\\ and\\ .\\[0\\].path\\ ==\\ \\\"/nested/inner.fifo\\\"\\ and\\ .\\[0\\].kind\\ ==\\ \\\"file_type\\\" <harness>/t8-special-1/mismatches-2.jsonl",
+          "started": "2026-10-19T18:57:15.071Z",
+          "finished": "2026-10-19T18:57:15.080Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "17-check-only-inner-fifo-file-type.log",
+          "log_sha256": "6d8fc31863063a240a1b10c59dad7e111732cea4331c65e881b5c863abbe5e17"
+        },
+        {
+          "note": "replace the wrong-type file with a FIFO of the source's mode and owner",
+          "at": "2026-10-19T18:57:15.102Z"
+        },
+        {
+          "step": "cutover-all-recreated",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/special-1 --cutover",
+          "started": "2026-10-19T18:57:15.206Z",
+          "finished": "2026-10-19T18:57:33.991Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "18-cutover-all-recreated.log",
+          "log_sha256": "092273d39c9e01cb70b5f87c6aaade638c92078eb80595e5bf107cd121c4c7fb"
+        },
+        {
+          "note": "inspection rerun: the walker and canonical rows from the first failed cutover pass (/var/lib/mongoose/qual-0.2.1/special-1/passes/pass-0001-failed-20261019T185658Z)",
+          "at": "2026-10-19T18:58:05.097Z"
+        },
+        {
+          "step": "walker-schema",
+          "command": "duckdb -c describe\\ select\\ \\*\\ from\\ read_parquet\\(\\\"<harness>/t8-special-1/walker2.tTr1/\\*.parquet\\\"\\)",
+          "started": "2026-10-19T18:58:05.240Z",
+          "finished": "2026-10-19T18:58:05.429Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "19-walker-schema.log",
+          "log_sha256": "551bc6de72166137230a99b27badf1a7f08a713963546eb24af448ac9f0bd5dd"
+        },
+        {
+          "step": "canonical-tags",
+          "command": "duckdb -c select\\ decode\\(path\\)\\ as\\ p\\,\\ file_type\\ as\\ tag\\,\\ printf\\(\\\"%06o\\\"\\,\\ \\\"mode\\\"\\)\\ as\\ mode_octal\\,\\ printf\\(\\\"%03o\\\"\\,\\ \\\"mode\\\"\\ \\>\\>\\ 12\\)\\ as\\ s_ifmt\\ from\\ read_parquet\\(\\\"<harness>/t8-special-1/canon2.nrJx/\\*.parquet\\\"\\)\\ order\\ by\\ 1",
+          "started": "2026-10-19T18:58:05.486Z",
+          "finished": "2026-10-19T18:58:05.579Z",
+          "exit": 1,
+          "expected": "0",
+          "ok": false,
+          "log": "20-canonical-tags.log",
+          "log_sha256": "81bf0ea72641c5f7a21994a9b103a62065f8362cd077c03cfa750bb7345ee9e7"
+        },
+        {
+          "step": "walker-rows",
+          "command": "bash -c duckdb\\ \\<\\ <harness>/t8-special-1/walker-rows.sql",
+          "started": "2026-10-19T18:58:15.214Z",
+          "finished": "2026-10-19T18:58:15.365Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "21-walker-rows.log",
+          "log_sha256": "66f7776356b84f2cf038c376074243b09f93168ea2207af8f5fde76030c0b6b9"
+        },
+        {
+          "step": "canonical-tags",
+          "command": "bash -c duckdb\\ \\<\\ <harness>/t8-special-1/canonical-tags.sql",
+          "started": "2026-10-19T18:58:15.386Z",
+          "finished": "2026-10-19T18:58:15.429Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "22-canonical-tags.log",
+          "log_sha256": "3d1e1d5a14e531f9f8a1b5262b8311bc6ab8d77895cd3c89337fc42261c1430e"
+        }
+      ]
+    },
+    {
+      "id": "interrupt",
+      "maps_to": [
+        "PR-09"
+      ],
+      "required": false,
+      "result": "pass",
+      "proves": "SIGINT mid-copy exits 130 and SIGTERM mid-sync exits 143 without advancing the baseline; reruns resume and the cutover passes.",
+      "final_run": {
+        "run": "t9-interrupt-3",
+        "started": "2026-10-19T18:19:07.435Z",
+        "finished": "2026-10-19T18:22:33.197Z",
+        "steps": 13,
+        "steps_not_ok": []
+      },
+      "earlier_runs": [
+        {
+          "run": "t9-interrupt-1",
+          "started": "2026-10-19T18:12:57.598Z",
+          "finished": "2026-10-19T18:15:35.521Z",
+          "steps": 12,
+          "steps_not_ok": [
+            "baseline-before",
+            "baseline-after",
+            "check-baseline-not-advanced"
+          ],
+          "reason": "harness: the baseline check ran before any baseline existed"
+        },
+        {
+          "run": "t9-interrupt-2",
+          "started": "2026-10-19T18:15:50.538Z",
+          "finished": "2026-10-19T18:18:54.957Z",
+          "steps": 13,
+          "steps_not_ok": [],
+          "reason": "harness: the source-change helper indexed past the last directory and stopped early"
+        }
+      ],
+      "steps": [
+        {
+          "step": "copy-sigint",
+          "command": "mongoose copy --src nfs://<server>/source/qual-0.2.1/bulk --dst nfs://<server>/dest/qual-0.2.1/interrupt-3 --work-dir /var/lib/mongoose/qual-0.2.1/interrupt-3 --parallel 2",
+          "started": "2026-10-19T18:19:07.435Z",
+          "finished": "2026-10-19T18:19:33.336Z",
+          "exit": 130,
+          "expected": "130",
+          "ok": true,
+          "log": "01-copy-sigint.log",
+          "log_sha256": "fcf5b61f44a0130a9729119cf5349e9a97446572aa968d99b262accc293edbeb",
+          "background": true
+        },
+        {
+          "step": "progress-after-sigint",
+          "command": "sudo -n jq -c \\{shards_total\\,\\ completed:\\ \\(.completed_shards\\ \\|\\ length\\)\\} /var/lib/mongoose/qual-0.2.1/interrupt-3/progress.json",
+          "started": "2026-10-19T18:19:33.351Z",
+          "finished": "2026-10-19T18:19:33.371Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "02-progress-after-sigint.log",
+          "log_sha256": "dc172e4f761f871d94752c1a84a9df830e52431c52d32b5b66fb746903ae96b6"
+        },
+        {
+          "step": "check-copy-was-incomplete",
+          "command": "bash -c \\(\\(\\ \\$\\(sudo\\ -n\\ jq\\ \\'.completed_shards\\ \\|\\ length\\'\\ /var/lib/mongoose/qual-0.2.1/interrupt-3/progress.json\\)\\ \\<\\ 32\\ \\)\\)",
+          "started": "2026-10-19T18:19:33.396Z",
+          "finished": "2026-10-19T18:19:33.423Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "03-check-copy-was-incomplete.log",
+          "log_sha256": "72e4b8d8baa5f7eb4eef298c601481b6fe2e0b8678a89b4a4feba8b3ba33816f"
+        },
+        {
+          "step": "copy-resume",
+          "command": "mg copy --src nfs://<server>/source/qual-0.2.1/bulk --dst nfs://<server>/dest/qual-0.2.1/interrupt-3 --work-dir /var/lib/mongoose/qual-0.2.1/interrupt-3 --parallel 2",
+          "started": "2026-10-19T18:19:33.445Z",
+          "finished": "2026-10-19T18:20:38.295Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "04-copy-resume.log",
+          "log_sha256": "17bc8990fd1eda575518da5ca8f73816322c97d20e21c8aaf4b6dd253519289d"
+        },
+        {
+          "step": "check-copy-now-complete",
+          "command": "bash -c \\(\\(\\ \\$\\(sudo\\ -n\\ jq\\ \\'.completed_shards\\ \\|\\ length\\'\\ /var/lib/mongoose/qual-0.2.1/interrupt-3/progress.json\\)\\ ==\\ 32\\ \\)\\)",
+          "started": "2026-10-19T18:20:38.318Z",
+          "finished": "2026-10-19T18:20:38.342Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "05-check-copy-now-complete.log",
+          "log_sha256": "aa89bf6dc3afae4758f842525c3cd6eb56276e40866dc5ca8c90338631a5ad78"
+        },
+        {
+          "note": "change the source and sync, so a baseline exists",
+          "at": "2026-10-19T18:20:38.366Z"
+        },
+        {
+          "note": "change 3-a: exit 0",
+          "at": "2026-10-19T18:20:48.746Z"
+        },
+        {
+          "step": "sync-1",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/interrupt-3",
+          "started": "2026-10-19T18:20:48.755Z",
+          "finished": "2026-10-19T18:21:08.248Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "06-sync-1.log",
+          "log_sha256": "e2cb54dafe2e77454d2c1436152ba7fe7fe0e68b1806eb9da41e7b0584188dbb"
+        },
+        {
+          "step": "baseline-before",
+          "command": "cat <harness>/t9-interrupt-3/baseline-before.json",
+          "started": "2026-10-19T18:21:08.284Z",
+          "finished": "2026-10-19T18:21:08.294Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "07-baseline-before.log",
+          "log_sha256": "b3b8d55cef634f953894d70bd382aabe2cf5d38510c53266498e0e4a5b596e73"
+        },
+        {
+          "note": "change the source again, then SIGTERM the sync once it is copying",
+          "at": "2026-10-19T18:21:08.312Z"
+        },
+        {
+          "note": "change 3-b: exit 0",
+          "at": "2026-10-19T18:21:19.178Z"
+        },
+        {
+          "step": "sync-sigterm",
+          "command": "mongoose sync --work-dir /var/lib/mongoose/qual-0.2.1/interrupt-3 --parallel 2",
+          "started": "2026-10-19T18:21:19.192Z",
+          "finished": "2026-10-19T18:21:32.736Z",
+          "exit": 143,
+          "expected": "143",
+          "ok": true,
+          "log": "08-sync-sigterm.log",
+          "log_sha256": "85a4c4e9935bd583ee0ffeb5a894b8b12a76d39011da2ec816142540fca6a6d0",
+          "background": true
+        },
+        {
+          "step": "baseline-after",
+          "command": "cat <harness>/t9-interrupt-3/baseline-after.json",
+          "started": "2026-10-19T18:21:32.766Z",
+          "finished": "2026-10-19T18:21:32.773Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "09-baseline-after.log",
+          "log_sha256": "8f441a5f693a329707de36207555ba7d31fcc579ee5e2fc5d1ed44e7b23d5159"
+        },
+        {
+          "step": "check-baseline-not-advanced",
+          "command": "diff <harness>/t9-interrupt-3/baseline-before.json <harness>/t9-interrupt-3/baseline-after.json",
+          "started": "2026-10-19T18:21:32.802Z",
+          "finished": "2026-10-19T18:21:32.808Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "10-check-baseline-not-advanced.log",
+          "log_sha256": "9084621a46a208527170fd03b82a0fb83edc6dc8e06eb1910f030aa726c77458"
+        },
+        {
+          "step": "sync-resume",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/interrupt-3",
+          "started": "2026-10-19T18:21:32.835Z",
+          "finished": "2026-10-19T18:21:50.375Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "11-sync-resume.log",
+          "log_sha256": "c992410838d502b5327491f9677ad35df40b4c12592cab5025e1339d5ec6294b"
+        },
+        {
+          "step": "sync-quiet",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/interrupt-3",
+          "started": "2026-10-19T18:21:50.396Z",
+          "finished": "2026-10-19T18:22:10.592Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "12-sync-quiet.log",
+          "log_sha256": "ddc4d0550a69cb8dddb4c5e9ddcaa401d051620ffc0d8f2f14b70b32c167a6cd"
+        },
+        {
+          "step": "cutover",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/interrupt-3 --cutover",
+          "started": "2026-10-19T18:22:10.616Z",
+          "finished": "2026-10-19T18:22:33.197Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "13-cutover.log",
+          "log_sha256": "9c01086949e7d6332dd4e1377d54f17ee6e88b6a2e50064dd6b75c74e602ac20"
+        }
+      ]
+    },
+    {
+      "id": "throughput",
+      "maps_to": [
+        "PR-07 raw-mover throughput gate"
+      ],
+      "required": true,
+      "result": "pass",
+      "proves": "Copy of the 58.6 GB fs-sim web tree with --parallel 32 in 77.0 s, against 75.6 s and 81.5 s for main builds in October (docs/work-items/BOUNDED_MEMORY.md); no threshold is defined. Verified byte for byte by the cutover.",
+      "final_run": {
+        "run": "t10-throughput-1",
+        "started": "2026-10-19T18:58:25.250Z",
+        "finished": "2026-10-19T19:02:00.020Z",
+        "steps": 4,
+        "steps_not_ok": []
+      },
+      "earlier_runs": [],
+      "steps": [
+        {
+          "step": "copy",
+          "command": "mg copy --src nfs://<server>/source/web --dst nfs://<server>/dest/qual-0.2.1/throughput-1 --work-dir /var/lib/mongoose/qual-0.2.1/throughput-1",
+          "started": "2026-10-19T18:58:25.250Z",
+          "finished": "2026-10-19T18:59:42.238Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "01-copy.log",
+          "log_sha256": "0f7f793e5baf16e67379c391b4aab1766d5bcdcacec92ca8fa06d3c9daa7c92b"
+        },
+        {
+          "step": "copy-summary",
+          "command": "grep -E \\^\\(\\ \\ found\\|complete:\\|index\\ ready\\) <harness>/t10-throughput-1/01-copy.log",
+          "started": "2026-10-19T18:59:42.268Z",
+          "finished": "2026-10-19T18:59:42.274Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "02-copy-summary.log",
+          "log_sha256": "aa38c0ec06341434a7bdc18751e719b257f703398853ff468bf734466f2b9158"
+        },
+        {
+          "step": "sync",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/throughput-1",
+          "started": "2026-10-19T18:59:42.303Z",
+          "finished": "2026-10-19T19:00:05.838Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "03-sync.log",
+          "log_sha256": "d0a7be3fbcc9fa1b7356d7940d43f265836319b7b16e4d735b1d1cdcddfafb6d"
+        },
+        {
+          "step": "cutover",
+          "command": "mg sync --work-dir /var/lib/mongoose/qual-0.2.1/throughput-1 --cutover",
+          "started": "2026-10-19T19:00:05.861Z",
+          "finished": "2026-10-19T19:02:00.020Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "04-cutover.log",
+          "log_sha256": "315d580a85a6473799989126f2353bfc49f1766c85e9f09b29ad98857b7738cf"
+        }
+      ]
+    },
+    {
+      "id": "portability",
+      "maps_to": [
+        "PR-11 acceptance"
+      ],
+      "required": true,
+      "result": "pass",
+      "proves": "The unchanged attested binary runs version, help, the libnfs license output, and a real copy, sync, and cutover on Rocky Linux 9.8 (glibc 2.34, the oldest declared) and Debian 12 (glibc 2.36).",
+      "final_run": {
+        "run": "t11-portability-2",
+        "started": "2026-10-19T19:03:14.945Z",
+        "finished": "2026-10-19T19:03:41.545Z",
+        "steps": 20,
+        "steps_not_ok": []
+      },
+      "earlier_runs": [
+        {
+          "run": "t11-portability-1",
+          "started": "2026-10-19T19:02:53.531Z",
+          "finished": "2026-10-19T19:03:05.898Z",
+          "steps": 20,
+          "steps_not_ok": [
+            "os-rocky9",
+            "version-rocky9",
+            "help-rocky9",
+            "licenses-rocky9",
+            "copy-rocky9",
+            "sync-rocky9",
+            "cutover-rocky9",
+            "os-debian12",
+            "version-debian12",
+            "help-debian12",
+            "licenses-debian12",
+            "copy-debian12",
+            "sync-debian12",
+            "cutover-debian12"
+          ],
+          "reason": "harness: a variable clash pointed the container's work-dir mount at a missing path, so podman refused every run"
+        }
+      ],
+      "steps": [
+        {
+          "step": "pull-rocky9",
+          "command": "sudo -n podman pull -q quay.io/rockylinux/rockylinux:9",
+          "started": "2026-10-19T19:03:14.945Z",
+          "finished": "2026-10-19T19:03:15.884Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "01-pull-rocky9.log",
+          "log_sha256": "295aad8efac0eaa319f79a7df7b26fa6d0950baa62eb048e42c27ccaf8e86300"
+        },
+        {
+          "step": "image-digest-rocky9",
+          "command": "sudo -n podman image inspect --format \\{\\{.Digest\\}\\} quay.io/rockylinux/rockylinux:9",
+          "started": "2026-10-19T19:03:15.909Z",
+          "finished": "2026-10-19T19:03:15.976Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "02-image-digest-rocky9.log",
+          "log_sha256": "a598242c8ba6f40b831c96cbfe5af08076e1a6049e7575a2fed577cdae8c27e1"
+        },
+        {
+          "step": "os-rocky9",
+          "command": "run sh -c grep\\ -E\\ \\\"\\^\\(PRETTY_NAME\\|VERSION_ID\\)=\\\"\\ /etc/os-release\\;\\ getconf\\ GNU_LIBC_VERSION\\;\\ uname\\ -m",
+          "started": "2026-10-19T19:03:16.015Z",
+          "finished": "2026-10-19T19:03:16.503Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "03-os-rocky9.log",
+          "log_sha256": "cfa6c21fe1d0ae45e4ab13b1aa289efa9a5dc358829b9079ad3baa6891ec9155"
+        },
+        {
+          "step": "version-rocky9",
+          "command": "run mongoose --version",
+          "started": "2026-10-19T19:03:16.523Z",
+          "finished": "2026-10-19T19:03:16.810Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "04-version-rocky9.log",
+          "log_sha256": "e32bb2106ec1618a1262825c65b5d4c3c4db3fa35a9974e51baadfd4148cf7c4"
+        },
+        {
+          "step": "help-rocky9",
+          "command": "run mongoose --help",
+          "started": "2026-10-19T19:03:16.830Z",
+          "finished": "2026-10-19T19:03:17.123Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "05-help-rocky9.log",
+          "log_sha256": "a77fd53ef97b933b290839c93888796a56d4e7cd771770da7021d5cb3382b0f8"
+        },
+        {
+          "step": "licenses-rocky9",
+          "command": "run sh -c mongoose\\ licenses\\ --component\\ libnfs\\ \\|\\ head\\ -20",
+          "started": "2026-10-19T19:03:17.145Z",
+          "finished": "2026-10-19T19:03:17.439Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "06-licenses-rocky9.log",
+          "log_sha256": "e1d701aa84fb8527089307d2aaaefe13e1664375fa177c7d7781938f00a53bbd"
+        },
+        {
+          "step": "copy-rocky9",
+          "command": "run mongoose copy --src nfs://<server>/source/qual-0.2.1/cutover-2/fan/d00 --dst nfs://<server>/dest/qual-0.2.1/port-2-rocky9 --work-dir /work/job",
+          "started": "2026-10-19T19:03:17.460Z",
+          "finished": "2026-10-19T19:03:21.174Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "07-copy-rocky9.log",
+          "log_sha256": "1f36f40dbbfa64652c60cf4fe190ac45b346c51724d58e2ba1138418f5f65441"
+        },
+        {
+          "step": "sync-rocky9",
+          "command": "run mongoose sync --work-dir /work/job",
+          "started": "2026-10-19T19:03:21.198Z",
+          "finished": "2026-10-19T19:03:23.125Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "08-sync-rocky9.log",
+          "log_sha256": "26823a8edaa13213892846c17ec239e8c95e32cb8a98d3688477b87c86e40cd7"
+        },
+        {
+          "step": "cutover-rocky9",
+          "command": "run mongoose sync --work-dir /work/job --cutover",
+          "started": "2026-10-19T19:03:23.144Z",
+          "finished": "2026-10-19T19:03:27.931Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "09-cutover-rocky9.log",
+          "log_sha256": "09f988f390c67b198466e7182f0ba4f61c80cf8452a705591021cf52c10535bc"
+        },
+        {
+          "step": "check-digest-unchanged-rocky9",
+          "command": "check_bin",
+          "started": "2026-10-19T19:03:27.951Z",
+          "finished": "2026-10-19T19:03:27.972Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "10-check-digest-unchanged-rocky9.log",
+          "log_sha256": "6fbed8bf857f74cf53ce2921de72f522dcf4d34dab138cd583a3440de5961adf"
+        },
+        {
+          "step": "pull-debian12",
+          "command": "sudo -n podman pull -q docker.io/library/debian:12",
+          "started": "2026-10-19T19:03:27.994Z",
+          "finished": "2026-10-19T19:03:28.851Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "11-pull-debian12.log",
+          "log_sha256": "03df00906cdbf7f9087bf9fb8eae48fc28af3906c81f947b90b0a8281eefc0f6"
+        },
+        {
+          "step": "image-digest-debian12",
+          "command": "sudo -n podman image inspect --format \\{\\{.Digest\\}\\} docker.io/library/debian:12",
+          "started": "2026-10-19T19:03:28.871Z",
+          "finished": "2026-10-19T19:03:28.934Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "12-image-digest-debian12.log",
+          "log_sha256": "2ce771ae0c5be5169fe54f323261b76999c74d022fb40467653a2f9fb29a3c09"
+        },
+        {
+          "step": "os-debian12",
+          "command": "run sh -c grep\\ -E\\ \\\"\\^\\(PRETTY_NAME\\|VERSION_ID\\)=\\\"\\ /etc/os-release\\;\\ getconf\\ GNU_LIBC_VERSION\\;\\ uname\\ -m",
+          "started": "2026-10-19T19:03:28.969Z",
+          "finished": "2026-10-19T19:03:29.279Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "13-os-debian12.log",
+          "log_sha256": "40ab65345f7da1e6d05f14185f7f62d40a62301cbc2fde2a9aa7e9532af8ed44"
+        },
+        {
+          "step": "version-debian12",
+          "command": "run mongoose --version",
+          "started": "2026-10-19T19:03:29.304Z",
+          "finished": "2026-10-19T19:03:29.625Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "14-version-debian12.log",
+          "log_sha256": "e32bb2106ec1618a1262825c65b5d4c3c4db3fa35a9974e51baadfd4148cf7c4"
+        },
+        {
+          "step": "help-debian12",
+          "command": "run mongoose --help",
+          "started": "2026-10-19T19:03:29.654Z",
+          "finished": "2026-10-19T19:03:30.106Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "15-help-debian12.log",
+          "log_sha256": "a77fd53ef97b933b290839c93888796a56d4e7cd771770da7021d5cb3382b0f8"
+        },
+        {
+          "step": "licenses-debian12",
+          "command": "run sh -c mongoose\\ licenses\\ --component\\ libnfs\\ \\|\\ head\\ -20",
+          "started": "2026-10-19T19:03:30.129Z",
+          "finished": "2026-10-19T19:03:30.551Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "16-licenses-debian12.log",
+          "log_sha256": "e1d701aa84fb8527089307d2aaaefe13e1664375fa177c7d7781938f00a53bbd"
+        },
+        {
+          "step": "copy-debian12",
+          "command": "run mongoose copy --src nfs://<server>/source/qual-0.2.1/cutover-2/fan/d00 --dst nfs://<server>/dest/qual-0.2.1/port-2-debian12 --work-dir /work/job",
+          "started": "2026-10-19T19:03:30.575Z",
+          "finished": "2026-10-19T19:03:34.605Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "17-copy-debian12.log",
+          "log_sha256": "5b7da8afb92ba9665c8a8fcdcf49150f0e3c923d8c5121928ef08007ae0e0b77"
+        },
+        {
+          "step": "sync-debian12",
+          "command": "run mongoose sync --work-dir /work/job",
+          "started": "2026-10-19T19:03:34.626Z",
+          "finished": "2026-10-19T19:03:36.578Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "18-sync-debian12.log",
+          "log_sha256": "ec68ea046b427d6fdf682a6c0c9cf522bb05a9a8eda4b1026d24068649eeeddf"
+        },
+        {
+          "step": "cutover-debian12",
+          "command": "run mongoose sync --work-dir /work/job --cutover",
+          "started": "2026-10-19T19:03:36.608Z",
+          "finished": "2026-10-19T19:03:41.502Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "19-cutover-debian12.log",
+          "log_sha256": "2f84b6925f99d0c4f2a958712ce986ef6fd49b73fbc31e5304f44cc873e0f43b"
+        },
+        {
+          "step": "check-digest-unchanged-debian12",
+          "command": "check_bin",
+          "started": "2026-10-19T19:03:41.528Z",
+          "finished": "2026-10-19T19:03:41.545Z",
+          "exit": 0,
+          "expected": "0",
+          "ok": true,
+          "log": "20-check-digest-unchanged-debian12.log",
+          "log_sha256": "6fbed8bf857f74cf53ce2921de72f522dcf4d34dab138cd583a3440de5961adf"
+        }
+      ]
+    }
+  ],
+  "not_run": [
+    {
+      "test": "scan-error",
+      "maps_to": "PR-02",
+      "reason": "Needs a source directory the server refuses to list. Root is not squashed on this export, so mongoose (which must run as root) can read every directory, and a libnfs ?uid= option on the source URL fails at the scan (finding url-options), so the scan cannot run as another user.",
+      "decision": {
+        "by": "project owner",
+        "date": "2026-10-19",
+        "words": "We'll accept that gap"
+      },
+      "coverage": "software tests only (walker fault injection and scan acceptance tests)"
+    }
+  ],
+  "findings": [
+    {
+      "id": "url-options",
+      "severity": "low",
+      "summary": "A source URL with libnfs options (for example ?uid=65534) fails at the scan: the walker passes the query string as part of the export path, so every mount fails and mongoose exits 1. Fails closed."
+    },
+    {
+      "id": "invalid-exclude-lock",
+      "severity": "low",
+      "summary": "An invalid --exclude is refused before any scan or run.json, but the work-dir lock creates the work directory and its .mongoose.lock first; the man page says 'refused before anything is written'."
+    },
+    {
+      "id": "failed-publish-partial",
+      "severity": "low",
+      "summary": "A publish whose rename fails (EEXIST onto a non-empty directory) leaves its .partial file in the destination tree; the cutover reports it as an extra until it is removed. Crash leftovers behave the same way and are documented; this case is not."
+    },
+    {
+      "id": "verify-gh-version",
+      "severity": "low",
+      "summary": "scripts/verify-release.sh and docs/BUILDING.md say gh 2.49 or newer, but `gh attestation verify --source-ref` first appears in gh 2.68.0; with 2.62 to 2.67 the verification fails at the provenance step."
+    },
+    {
+      "id": "dns-transient",
+      "severity": "environment",
+      "summary": "One copy's mount failed to resolve the server name; mongoose exited 1 and a rerun was clean."
+    }
+  ],
+  "approval": {
+    "scan_error_gap": "accepted by the project owner on 2026-10-19",
+    "publish": "pending: given by the project owner in the protected `release` environment of workflow run 39294683056"
+  }
+}

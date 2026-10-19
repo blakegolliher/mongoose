@@ -6,8 +6,9 @@ Status (2026-10-19):
 - **11C-2, release gate hardening:** merged in PR #12 (`4c409a9`).
 - **11C-3, SBOM, signed checksums, and provenance:** merged in PR #13
   (`4019125`).
-- **11C-4, real-NFS qualification and the release record:** inventory set;
-  runs on the attested v0.2.1 binary once it is tagged.
+- **11C-4, real-NFS qualification and the release record:** ran for v0.2.1
+  on 2026-10-19 (`docs/qualification/2026-10-19-v0.2.1-release.md`). The scan-error test
+  was not run, and the owner accepted that gap.
 
 This is the third slice of PR-11 in `docs/PRODUCTION_RELEASE_HANDOFF.md`. It
 covers PR-11's required outcomes 4 to 8, and the acceptance items about
@@ -185,7 +186,7 @@ created yet. Before release, the exact `cosign verify-blob` and
 Sigstore-signed releases from other projects. They passed there, and they
 failed on a wrong identity, a wrong tag or workflow, and a tampered file.
 
-## 11C-4 — real-NFS qualification and the release record (inventory set)
+## 11C-4 — real-NFS qualification and the release record (v0.2.1 recorded)
 
 Maps to PR-11 required outcome 8 and to the production exit criteria.
 GitHub-hosted runners cannot reach the NFS systems.
