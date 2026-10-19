@@ -1,10 +1,11 @@
 # Production release readiness handoff
 
-Status (2026-10-19): **release blocked on hardware qualification only.**
-PR-01 to PR-10 and PR-11A, PR-11B, and slices 1 to 3 of PR-11C are merged.
-The owner approved the static libnfs distribution model on 2026-10-19
-(PR-10). What remains is 11C-4: the hardware tests on the attested v0.2.1
-binary and its release record (`docs/PR_11C_RELEASE_HARDENING_HANDOFF.md`).
+Status (2026-10-19): **v0.2.1 is qualified; publication awaits the owner's
+approval.** PR-01 to PR-10 and PR-11 are merged. The owner approved the
+static libnfs distribution model on 2026-10-19 (PR-10). The 11C-4 record,
+`docs/qualification/2026-10-19-v0.2.1-release.md`, shows every required hardware test passing
+on the attested v0.2.1 binary except the scan-error test (PR-02). That test
+was not run, and the owner accepted the gap on 2026-10-19.
 
 This document turns the 2026-09-28 production-readiness review into
 independently assignable work items. It is intended for a mixed team of human
@@ -77,7 +78,8 @@ outstanding:** the exclude check against a real export.
 Suggested lead: LLM implementer in the walker repository; human review of the
 operator-facing matching contract.
 
-Merged in PR #1 (`e9fa2e7`, commits `7456801` and `2a81247`).
+Merged in PR #1 (`e9fa2e7`, commits `7456801` and `2a81247`). Hardware
+gate passed on 2026-10-19 (`docs/qualification/2026-10-19-v0.2.1-release.md`).
 
 ### Problem
 
@@ -157,7 +159,10 @@ success.
 Suggested lead: LLM implementer; human review of which walker errors are
 recoverable inside the walker versus fatal to the scan as a whole.
 
-Merged in PR #1 (`e9fa2e7`, commit `69f273f`).
+Merged in PR #1 (`e9fa2e7`, commit `69f273f`). Hardware gate not run for
+v0.2.1: these exports do not squash root, so no source directory could be
+made unreadable to mongoose. The owner accepted the gap on 2026-10-19
+(`docs/qualification/2026-10-19-v0.2.1-release.md`).
 
 ### Problem
 
@@ -215,7 +220,8 @@ directory fan-out, and the excluded-subtree check on a real export.
 
 Suggested lead: human design owner, with LLM implementation support.
 
-Merged in PR #1 (`e9fa2e7`, commit `a7475be`).
+Merged in PR #1 (`e9fa2e7`, commit `a7475be`). Hardware gate passed on
+2026-10-19 (`docs/qualification/2026-10-19-v0.2.1-release.md`).
 
 ### Problem
 
@@ -301,7 +307,8 @@ export, two exports on one server, and the no-CREATE assertion.
 Suggested lead: human design owner familiar with NFSv3 identity and libnfs;
 mixed implementation.
 
-Merged in PR #1 (`e9fa2e7`, commit `dfe5f4e`).
+Merged in PR #1 (`e9fa2e7`, commit `dfe5f4e`). Hardware gate passed on
+2026-10-19 (`docs/qualification/2026-10-19-v0.2.1-release.md`).
 
 ### Problem
 
@@ -350,8 +357,8 @@ String inequality is not proof that two NFS URLs are disjoint.
 
 Priority: **P0 / release blocker for crash-safe resume**
 
-Status: merged in PR #1 (`e9fa2e7`, commit `c3e91d7`). **Hardware gate
-outstanding:** the crash test under 11C-4.
+Status: merged in PR #1 (`e9fa2e7`, commit `c3e91d7`). The crash test
+passed on 2026-10-19 (`docs/qualification/2026-10-19-v0.2.1-release.md`).
 
 Suggested lead: LLM implementer; human review of filesystem ordering.
 
@@ -393,8 +400,8 @@ the pending set, so they may never be retried.
 
 Priority: **P1 / required before production**
 
-Status: merged in PR #1 (`e9fa2e7`, commit `e003480`). **Hardware gate
-outstanding:** the concurrency test under 11C-4.
+Status: merged in PR #1 (`e9fa2e7`, commit `e003480`). The concurrency
+test passed on 2026-10-19 (`docs/qualification/2026-10-19-v0.2.1-release.md`).
 
 Suggested lead: LLM implementer.
 
@@ -439,8 +446,8 @@ multi-file state machines safe to run concurrently.
 
 Priority: **P1 / required before production**
 
-Status: merged in PR #14 (`6d1de7a`). **Hardware gate outstanding:** the
-torn-copy test under 11C-4.
+Status: merged in PR #14 (`6d1de7a`). The torn-copy test and the
+throughput run passed on 2026-10-19 (`docs/qualification/2026-10-19-v0.2.1-release.md`).
 
 Suggested lead: mixed implementation; human review and hardware validation of
 new raw libnfs operations.
@@ -679,7 +686,8 @@ real-NFS qualification) is tracked in
 Status (2026-10-19): PR-11B merged in PRs #6, #7, and #9. PR-11C slices 1 to
 3 merged in PRs #10, #12, and #13, and the release dry run passes on every
 pull request that touches the release machinery. 11C-4, real-NFS
-qualification and the release record, remains.
+qualification and the release record, ran for v0.2.1 on 2026-10-19
+(`docs/qualification/2026-10-19-v0.2.1-release.md`).
 
 ### Problem
 
@@ -761,6 +769,9 @@ sockets with a local build of `main` `63301e6`
 not tested, and the server refused non-UTF-8 names. The release must repeat
 the procedure with the attested binary under 11C-4.
 
+Status (2026-10-19): repeated with the attested v0.2.1 binary, and passed
+(`docs/qualification/2026-10-19-v0.2.1-release.md`).
+
 ## Production release exit criteria
 
 The release owner can remove the block only when all of the following are true:
@@ -782,9 +793,9 @@ The release owner can remove the block only when all of the following are true:
 - Dependency, portability, package, and real-NFS gates are attached to the
   release record.
 
-Status (2026-10-19): PR-01 to PR-10 are merged, and the libnfs model is
-approved. CI at the release tag, the hardware tests, and the release record
-remain; 11C-4 covers them for v0.2.1.
+Status (2026-10-19): met for v0.2.1, with one owner-accepted gap: the
+scan-error hardware test was not run. CI and the release workflow passed
+at the tag, and `docs/qualification/2026-10-19-v0.2.1-release.md` is the release record.
 
 Until then, release candidates may be useful for controlled lab evaluation,
 but should not be described as production-safe or as proving source/destination
