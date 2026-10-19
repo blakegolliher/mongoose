@@ -5,9 +5,8 @@ approved its design. **Phase 2 merged** (mongoose PR #7, `d4e782a`, and
 nfs-walker PR #11, `f659573`, 2026-09-29). See "Phase 2 (implemented)" below.
 The owner release gate then failed on two relink-kit defects, which are
 outside this handoff: a SIGPIPE false failure in `verify-relink.sh`, and an
-empty offline source map from `cargo vendor --quiet`. Branch
-`lgpl-relink-repair` fixes both. PR-11B is not complete until
-`make release` passes.
+empty offline source map from `cargo vendor --quiet`. PR #9 (`a973985`)
+fixed both, and `make release` passes in the release dry run.
 
 Suggested implementers:
 

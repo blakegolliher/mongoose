@@ -1,6 +1,10 @@
 # Production release readiness handoff
 
-Status: **release blocked**
+Status (2026-10-19): **release blocked on hardware qualification only.**
+PR-01 to PR-10 and PR-11A, PR-11B, and slices 1 to 3 of PR-11C are merged.
+The owner approved the static libnfs distribution model on 2026-10-19
+(PR-10). What remains is 11C-4: the hardware tests on the attested v0.2.1
+binary and its release record (`docs/PR_11C_RELEASE_HARDENING_HANDOFF.md`).
 
 This document turns the 2026-09-28 production-readiness review into
 independently assignable work items. It is intended for a mixed team of human
@@ -72,6 +76,8 @@ outstanding:** the exclude check against a real export.
 
 Suggested lead: LLM implementer in the walker repository; human review of the
 operator-facing matching contract.
+
+Merged in PR #1 (`e9fa2e7`, commits `7456801` and `2a81247`).
 
 ### Problem
 
@@ -151,6 +157,8 @@ success.
 Suggested lead: LLM implementer; human review of which walker errors are
 recoverable inside the walker versus fatal to the scan as a whole.
 
+Merged in PR #1 (`e9fa2e7`, commit `69f273f`).
+
 ### Problem
 
 The walker returns `WalkStats { errors, completed }`. Mongoose prints
@@ -206,6 +214,8 @@ real NFSv3 exports, at least one multi-gigabyte file, concurrent
 directory fan-out, and the excluded-subtree check on a real export.
 
 Suggested lead: human design owner, with LLM implementation support.
+
+Merged in PR #1 (`e9fa2e7`, commit `a7475be`).
 
 ### Problem
 
@@ -291,6 +301,8 @@ export, two exports on one server, and the no-CREATE assertion.
 Suggested lead: human design owner familiar with NFSv3 identity and libnfs;
 mixed implementation.
 
+Merged in PR #1 (`e9fa2e7`, commit `dfe5f4e`).
+
 ### Problem
 
 The startup and per-file self-target checks treat unequal URL strings as
@@ -338,6 +350,9 @@ String inequality is not proof that two NFS URLs are disjoint.
 
 Priority: **P0 / release blocker for crash-safe resume**
 
+Status: merged in PR #1 (`e9fa2e7`, commit `c3e91d7`). **Hardware gate
+outstanding:** the crash test under 11C-4.
+
 Suggested lead: LLM implementer; human review of filesystem ordering.
 
 ### Problem
@@ -377,6 +392,9 @@ the pending set, so they may never be retried.
 ## PR-06 — Enforce one live process per work directory
 
 Priority: **P1 / required before production**
+
+Status: merged in PR #1 (`e9fa2e7`, commit `e003480`). **Hardware gate
+outstanding:** the concurrency test under 11C-4.
 
 Suggested lead: LLM implementer.
 
@@ -420,6 +438,9 @@ multi-file state machines safe to run concurrently.
 ## PR-07 — Add torn-copy detection to the mover mongoose actually uses
 
 Priority: **P1 / required before production**
+
+Status: merged in PR #14 (`6d1de7a`). **Hardware gate outstanding:** the
+torn-copy test under 11C-4.
 
 Suggested lead: mixed implementation; human review and hardware validation of
 new raw libnfs operations.
@@ -482,6 +503,8 @@ In either approach:
 
 Priority: **P1 / required before production**
 
+Status: merged in PR #1 (`e9fa2e7`, commit `f4826f9`).
+
 Suggested lead: LLM implementer.
 
 ### Problem
@@ -523,6 +546,8 @@ intended state tree.
 
 Priority: **P1 / required for safe automation**
 
+Status: merged in PR #1 (`e9fa2e7`, commit `f97529b`).
+
 Suggested lead: LLM implementer.
 
 ### Problem
@@ -556,7 +581,9 @@ distinguish a complete migration from one that must be resumed.
 
 Priority: **P0 / distribution blocker**
 
-Status: **Implemented locally on 2026-09-28; owner review required before publication.**
+Status: merged in PR #1 (`e9fa2e7`); the relink-kit fixes merged in PR #9
+(`a973985`). **The project owner approved the static-link model for
+publication on 2026-10-19.**
 
 Suggested lead: human release/legal owner. This item requires legal review;
 implementation work can be delegated after the distribution model is chosen.
@@ -648,6 +675,11 @@ maps that path to a fixed name, re-pins the digest, and makes CI enforce it.
 The rest of PR-11C (release gate hardening; SBOM, signing, and provenance;
 real-NFS qualification) is tracked in
 `docs/PR_11C_RELEASE_HARDENING_HANDOFF.md`.
+
+Status (2026-10-19): PR-11B merged in PRs #6, #7, and #9. PR-11C slices 1 to
+3 merged in PRs #10, #12, and #13, and the release dry run passes on every
+pull request that touches the release machinery. 11C-4, real-NFS
+qualification and the release record, remains.
 
 ### Problem
 
@@ -749,6 +781,10 @@ The release owner can remove the block only when all of the following are true:
   contain the required compliance material.
 - Dependency, portability, package, and real-NFS gates are attached to the
   release record.
+
+Status (2026-10-19): PR-01 to PR-10 are merged, and the libnfs model is
+approved. CI at the release tag, the hardware tests, and the release record
+remain; 11C-4 covers them for v0.2.1.
 
 Until then, release candidates may be useful for controlled lab evaluation,
 but should not be described as production-safe or as proving source/destination
